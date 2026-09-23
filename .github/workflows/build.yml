@@ -1,0 +1,49 @@
+name: Build GameVault Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install flask requests pywebview psutil icoextract pillow pywin32 pyinstaller
+
+      - name: Create icon
+        run: python make_icon.py
+
+      - name: Build with PyInstaller (onedir)
+        run: >
+          pyinstaller --noconfirm --clean --onedir --windowed
+          --name GameVault
+          --icon=icon.ico
+          --hidden-import=win32com.client
+          --hidden-import=pythoncom
+          --hidden-import=pywintypes
+          --collect-all webview
+          GameVault_app.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y
+
+      - name: Build installer with Inno Setup
+        run: |
+          mkdir installer
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "GameVault.iss"
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameVault_Setup
+          path: installer\GameVault_Setup.exe
