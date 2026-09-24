@@ -2466,6 +2466,18 @@ def _version_is_newer(latest, current):
     return a > b
 
 
+def _tag_has_version(tag):
+    """True if the tag has at least one digit we can compare on ('1.0.1',
+    'v1.0.1', 'release-1.0.1' all pass). A tag like 'feat' or 'latest' has
+    no digits, so _version_tuple would silently read it as 0.0.0 and it
+    would never be offered as an update -- this lets the caller flag that
+    instead of dropping the release without explanation."""
+    v = (tag or "").strip()
+    if v[:1].lower() == "v":
+        v = v[1:]
+    return any(c.isdigit() for c in v)
+
+
 # Background download/install state, polled by the frontend (added in a
 # later step). stage is one of: idle, downloading, launching, done, error.
 _update_install_state = {"stage": "idle", "percent": 0, "error": None}
@@ -2519,12 +2531,17 @@ def check_for_update(timeout=8):
                 reason = "is marked as a pre-release"
             elif not asset:
                 reason = "has no installer (.exe) attached"
+            elif not _tag_has_version(tag):
+                reason = "isn't tagged with a version number"
             else:
                 reason = None
             if reason is None:
                 usable.append((r, asset))
-            elif _version_is_newer(tag, APP_VERSION):
-                skipped.append({"tag": tag, "reason": reason})
+            elif reason == "isn't tagged with a version number" or _version_is_newer(tag, APP_VERSION):
+                # An unversioned tag can't be compared to APP_VERSION, so it's
+                # always surfaced rather than silently dropped like the other
+                # two reasons (which only matter if the release IS newer).
+                skipped.append({"tag": tag or "(untagged)", "reason": reason})
 
         result = {
             **base,
