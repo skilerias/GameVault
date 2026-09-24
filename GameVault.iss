@@ -41,18 +41,19 @@ RestartApplications=no
 ; PyInstaller's runtime folder is wiped before copying the new one, so files
 ; that no longer exist in the new build don't pile up between versions.
 ; User data lives in %APPDATA%\GameVault and is NOT touched.
-type: filesandordirs; Name: "{app}\_internal"
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 Source: "dist\GameVault\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-; createonlyifdoesntexist: GameVault rewrites its own shortcuts when you change the
-; app icon, so an update must not put the default icon back.
+; GameVault rewrites its own shortcuts when you change the app icon, so an
+; update must not put the default icon back (Inno has no "only if missing"
+; flag for icons, so a Check function is used instead).
 ; The Desktop shortcut is only created on a fresh install (not re-created
 ; on every update if you deleted it on purpose).
-Name: "{autodesktop}\GameVault"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Flags: createonlyifdoesntexist; Check: not IsUpgrade
-Name: "{autoprograms}\GameVault"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Flags: createonlyifdoesntexist
+Name: "{autodesktop}\GameVault"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Check: not IsUpgrade
+Name: "{autoprograms}\GameVault"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#MyAppExeName}"; Check: StartMenuShortcutMissing
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch GameVault"; Flags: nowait postinstall skipifsilent
@@ -76,6 +77,11 @@ end;
 function IsUpgrade: Boolean;
 begin
   Result := GetInstalledVersion <> '';
+end;
+
+function StartMenuShortcutMissing: Boolean;
+begin
+  Result := not FileExists(ExpandConstant('{autoprograms}\GameVault.lnk'));
 end;
 
 // Make sure GameVault (and its embedded browser child processes) isn't running,
