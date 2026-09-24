@@ -20,6 +20,13 @@ if not defined PY (
     exit /b 1
 )
 
+if not exist "VERSION" (
+    echo ERROR: VERSION file not found next to this BAT.
+    echo Create a file named VERSION containing something like 1.0.0
+    pause
+    exit /b 1
+)
+
 echo [1/5] Checking required Python packages...
 %PY% -m pip install flask requests pywebview psutil icoextract pillow pywin32 pyinstaller
 if errorlevel 1 (
@@ -46,6 +53,7 @@ if exist dist rmdir /s /q dist
 %PY% -m PyInstaller --noconfirm --clean --onedir --windowed ^
  --name GameVault ^
  --icon=icon.ico ^
+ --add-data "VERSION;." ^
  --hidden-import=win32com.client ^
  --hidden-import=pythoncom ^
  --hidden-import=pywintypes ^
@@ -86,11 +94,16 @@ if not defined ISCC (
 
 echo Found: %ISCC%
 
-REM Every build gets a new version number (year.month.day.HHmm) so the
-REM installer knows it is an UPDATE when GameVault is already installed.
+REM The version comes from the VERSION file (same one bundled into the app
+REM and used by the GitHub workflow), so the installer version and the
+REM version shown inside GameVault always match. Bump VERSION to ship an update.
 set "APPVER="
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy.M.d.HHmm"') do set "APPVER=%%i"
-if not defined APPVER set "APPVER=1.0.0"
+for /f "usebackq delims=" %%i in ("VERSION") do if not defined APPVER set "APPVER=%%i"
+if not defined APPVER (
+    echo ERROR: VERSION file is empty.
+    pause
+    exit /b 1
+)
 echo Version: %APPVER%
 
 echo.
