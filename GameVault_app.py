@@ -423,40 +423,80 @@ SESSION.mount("http://", _adapter)
 
 
 # ---------- storage ----------
+#
+# All writes below go through _atomic_write_json, which:
+#   1. writes the new data to a temp file in the same folder,
+#   2. flushes + fsyncs it to disk,
+#   3. atomically replaces the real file with os.replace().
+# os.replace() on Windows/NTFS either fully succeeds or fully fails - there
+# is no in-between state where the target file is half-written. That means
+# a power loss can no longer leave library.json truncated/corrupted: the
+# old file stays intact until the new one is completely and safely on disk.
+# Before replacing, the previous good file is also copied to a rotating
+# ".bak" as a second safety net.
+
+def _atomic_write_json(path, data):
+    folder = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, path + ".bak")
+            except OSError:
+                pass
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def _load_json_with_backup(path, default):
+    for candidate in (path, path + ".bak"):
+        if os.path.exists(candidate):
+            try:
+                with open(candidate, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if candidate != path:
+                    # Main file was missing/corrupted; restore it from
+                    # the backup right away so future saves stay honest.
+                    try:
+                        shutil.copy2(candidate, path)
+                    except OSError:
+                        pass
+                return data
+            except (OSError, ValueError):
+                continue
+    return default
+
 
 def load_library():
-    if os.path.exists(LIBRARY_FILE):
-        with open(LIBRARY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return _load_json_with_backup(LIBRARY_FILE, [])
 
 
 def save_library(games):
-    with open(LIBRARY_FILE, "w", encoding="utf-8") as f:
-        json.dump(games, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(LIBRARY_FILE, games)
 
 def load_custom_categories():
-    if os.path.exists(CATEGORIES_FILE):
-        with open(CATEGORIES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    return []
+    data = _load_json_with_backup(CATEGORIES_FILE, [])
+    return data if isinstance(data, list) else []
 
 def save_custom_categories(categories):
-    with open(CATEGORIES_FILE, "w", encoding="utf-8") as f:
-        json.dump(categories, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(CATEGORIES_FILE, categories)
 
 
 def load_local_folders():
-    if os.path.exists(LOCAL_FOLDERS_FILE):
-        with open(LOCAL_FOLDERS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    return []
+    data = _load_json_with_backup(LOCAL_FOLDERS_FILE, [])
+    return data if isinstance(data, list) else []
 
 def save_local_folders(folders):
-    with open(LOCAL_FOLDERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(folders, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(LOCAL_FOLDERS_FILE, folders)
 
 
 def _extract_exe_icon_data_uri(exe_path):
@@ -844,8 +884,7 @@ def _load_dlc_cache():
 
 def _save_dlc_cache(cache):
     try:
-        with open(DLC_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(DLC_CACHE_FILE, cache)
     except OSError:
         pass
 
