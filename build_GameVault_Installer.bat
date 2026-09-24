@@ -74,6 +74,14 @@ if not exist "dist\GameVault\GameVault.exe" (
     exit /b 1
 )
 
+REM Fail loudly if VERSION didn't get bundled (that's what shows 0.0.0 in the app).
+if not exist "dist\GameVault\_internal\VERSION" if not exist "dist\GameVault\VERSION" (
+    echo ERROR: VERSION was not bundled into dist\GameVault.
+    echo The app would show version 0.0.0 and updates would not work.
+    pause
+    exit /b 1
+)
+
 echo.
 echo [4/5] Finding Inno Setup compiler...
 set "ISCC="

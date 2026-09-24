@@ -57,6 +57,17 @@ jobs:
           --collect-all webview
           GameVault_app.py
 
+      # Fail the build if VERSION didn't make it into the bundle -- otherwise
+      # the app ships showing 0.0.0 and in-app updates never work.
+      - name: Verify VERSION is bundled
+        shell: pwsh
+        run: |
+          if (-not ((Test-Path "dist/GameVault/_internal/VERSION") -or (Test-Path "dist/GameVault/VERSION"))) {
+            Write-Error "VERSION was not bundled into dist/GameVault"
+            exit 1
+          }
+          Get-ChildItem -Recurse dist/GameVault -Filter VERSION | ForEach-Object { Write-Host "Found: $($_.FullName)" }
+
       - name: Install Inno Setup
         run: choco install innosetup -y
 

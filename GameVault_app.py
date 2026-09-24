@@ -2365,26 +2365,83 @@ GITHUB_UPDATE_REPO = "skilerias/GameVault"
 GITHUB_API_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_UPDATE_REPO}/releases/latest"
 
 
-def _bundled_version_file():
-    """Path to the VERSION file, wherever it ends up at runtime: bundled
-    as a data file next to a frozen (PyInstaller) build, or sitting in the
-    repo next to this script when run from source."""
-    base = getattr(sys, "_MEIPASS", None) or APP_DIR
-    return os.path.join(base, "VERSION")
+# Must match AppId in GameVault.iss (Inno writes DisplayVersion under it).
+_INSTALLER_APP_ID = "{8F4F7E4D-8B1A-4D9B-9F2E-7A7D4A6C9D31}"
+
+
+def _version_file_candidates():
+    """Every place the VERSION file could plausibly be: PyInstaller's data
+    folder (_MEIPASS; that's <install>\\_internal on PyInstaller 6), the
+    install folder itself, its _internal subfolder, and next to this script
+    when run from source."""
+    bases = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        bases.append(meipass)
+    bases += [
+        APP_DIR,
+        os.path.join(APP_DIR, "_internal"),
+        os.path.dirname(os.path.abspath(__file__)),
+    ]
+    seen, out = set(), []
+    for b in bases:
+        path = os.path.join(b, "VERSION")
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def _installed_version_from_registry():
+    """Version the installer recorded for this install (Inno Setup writes
+    DisplayVersion to the uninstall key). Safety net for when VERSION didn't
+    make it into the bundle. Windows only; returns '' if not found."""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    subkey = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\%s_is1" % _INSTALLER_APP_ID
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                with winreg.OpenKey(hive, subkey, 0, winreg.KEY_READ | view) as k:
+                    value, _ = winreg.QueryValueEx(k, "DisplayVersion")
+                value = str(value).strip()
+                if value:
+                    return value
+            except OSError:
+                continue
+    return ""
+
+
+def _resolve_app_version():
+    """(version, where_it_came_from). Never raises."""
+    for path in _version_file_candidates():
+        try:
+            # utf-8-sig so a BOM from Windows editors can't corrupt the number
+            with open(path, "r", encoding="utf-8-sig") as f:
+                v = f.read().strip()
+            if v:
+                return v, path
+        except (OSError, UnicodeDecodeError):
+            continue
+    if getattr(sys, "frozen", False):
+        try:
+            v = _installed_version_from_registry()
+        except Exception:
+            v = ""
+        if v:
+            return v, "installer registry entry"
+    # '0.0.0' so an update always looks newer, rather than the check
+    # silently never firing, if the version genuinely can't be found.
+    return "0.0.0", "not found"
 
 
 def get_app_version():
-    """Version of the copy that's currently running. Falls back to
-    '0.0.0' (so an update always looks newer, rather than the check
-    silently never firing) if VERSION is ever missing."""
-    try:
-        with open(_bundled_version_file(), "r", encoding="utf-8") as f:
-            return f.read().strip() or "0.0.0"
-    except OSError:
-        return "0.0.0"
+    return _resolve_app_version()[0]
 
 
-APP_VERSION = get_app_version()
+APP_VERSION, APP_VERSION_SOURCE = _resolve_app_version()
 
 
 def _version_tuple(v):
@@ -2490,7 +2547,9 @@ def _run_update_download_and_launch(download_url, asset_name):
 
 @app.route("/api/app_update/check")
 def api_app_update_check():
-    return jsonify(check_for_update())
+    result = check_for_update()
+    result["version_source"] = APP_VERSION_SOURCE
+    return jsonify(result)
 
 
 @app.route("/api/app_update/install", methods=["POST"])
@@ -3781,6 +3840,7 @@ async function refreshUpdateInfo(userInitiated){
     const data=await res.json();
     _latestUpdateInfo=data;
     if(updateCurrentVersion)updateCurrentVersion.textContent=data.current_version||'—';
+    if(updateCurrentVersion&&data.version_source)updateCurrentVersion.title='Read from: '+data.version_source;
     if(!data.ok){
       updateStatus.textContent=formatUpdateCheckError(data);
       return;
