@@ -2356,6 +2356,162 @@ def api_theme_from_image():
     return jsonify({"ok": True, "hex": hex_color})
 
 
+# ---------- self-update (from GitHub Releases) ----------
+# Where updates are published. GameVault.iss's AppId never changes, so a
+# newer GameVault_Setup.exe run on top of an existing install upgrades it
+# in place (same folder, same shortcuts, library/settings untouched) --
+# see GameVault.iss for that half of the flow. This just finds and runs it.
+GITHUB_UPDATE_REPO = "skilerias/GameVault"
+GITHUB_API_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_UPDATE_REPO}/releases/latest"
+
+
+def _bundled_version_file():
+    """Path to the VERSION file, wherever it ends up at runtime: bundled
+    as a data file next to a frozen (PyInstaller) build, or sitting in the
+    repo next to this script when run from source."""
+    base = getattr(sys, "_MEIPASS", None) or APP_DIR
+    return os.path.join(base, "VERSION")
+
+
+def get_app_version():
+    """Version of the copy that's currently running. Falls back to
+    '0.0.0' (so an update always looks newer, rather than the check
+    silently never firing) if VERSION is ever missing."""
+    try:
+        with open(_bundled_version_file(), "r", encoding="utf-8") as f:
+            return f.read().strip() or "0.0.0"
+    except OSError:
+        return "0.0.0"
+
+
+APP_VERSION = get_app_version()
+
+
+def _version_tuple(v):
+    """'v1.2.10' / '1.2.10' -> (1, 2, 10). Non-numeric parts are dropped
+    so an odd tag (e.g. '1.2.0-beta') still compares reasonably instead
+    of blowing up."""
+    v = (v or "").strip()
+    if v[:1].lower() == "v":
+        v = v[1:]
+    parts = []
+    for chunk in v.split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) or (0,)
+
+
+def _version_is_newer(latest, current):
+    a, b = _version_tuple(latest), _version_tuple(current)
+    length = max(len(a), len(b))
+    a = a + (0,) * (length - len(a))
+    b = b + (0,) * (length - len(b))
+    return a > b
+
+
+# Background download/install state, polled by the frontend (added in a
+# later step). stage is one of: idle, downloading, launching, done, error.
+_update_install_state = {"stage": "idle", "percent": 0, "error": None}
+
+
+def check_for_update(timeout=8):
+    """Ask GitHub for GITHUB_UPDATE_REPO's latest release and compare it to
+    the running version. Returns a plain dict and never raises -- network
+    problems, a repo with no releases yet, etc. all come back as a normal
+    {"ok": False, ...} result the caller can show in the UI."""
+    try:
+        resp = requests.get(
+            GITHUB_API_RELEASES_LATEST,
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=timeout,
+        )
+        if resp.status_code == 404:
+            return {"ok": False, "error": "no_releases", "current_version": APP_VERSION}
+        resp.raise_for_status()
+        release = resp.json()
+        latest_version = release.get("tag_name") or ""
+        assets = release.get("assets") or []
+        # The installer asset -- whatever .exe the release has attached.
+        installer_asset = next(
+            (a for a in assets if str(a.get("name", "")).lower().endswith(".exe")),
+            None,
+        )
+        return {
+            "ok": True,
+            "current_version": APP_VERSION,
+            "latest_version": latest_version,
+            "update_available": bool(installer_asset) and _version_is_newer(latest_version, APP_VERSION),
+            "notes": release.get("body") or "",
+            "download_url": installer_asset.get("browser_download_url") if installer_asset else None,
+            "asset_name": installer_asset.get("name") if installer_asset else None,
+            "release_url": release.get("html_url"),
+        }
+    except requests.RequestException as e:
+        return {"ok": False, "error": "network", "detail": str(e), "current_version": APP_VERSION}
+    except Exception as e:
+        return {"ok": False, "error": "unexpected", "detail": str(e), "current_version": APP_VERSION}
+
+
+def _run_update_download_and_launch(download_url, asset_name):
+    """Runs in a background thread: download the installer to a temp
+    folder, then launch it. GameVault.iss's installer already knows how to
+    close a running GameVault and upgrade it in place (see PrepareToInstall
+    there), so once it's launched this app's job is done."""
+    global _update_install_state
+    import subprocess
+    try:
+        _update_install_state = {"stage": "downloading", "percent": 0, "error": None}
+        tmp_dir = tempfile.mkdtemp(prefix="gamevault_update_")
+        installer_path = os.path.join(tmp_dir, asset_name or "GameVault_Setup.exe")
+        with requests.get(download_url, stream=True, timeout=30) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+            written = 0
+            with open(installer_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=262144):
+                    if not chunk:
+                        continue
+                    f.write(chunk)
+                    written += len(chunk)
+                    if total:
+                        _update_install_state["percent"] = min(99, int(written * 100 / total))
+        _update_install_state = {"stage": "launching", "percent": 100, "error": None}
+        # Detached so the installer survives this app closing/being killed
+        # a moment later (the installer force-closes GameVault itself too).
+        if sys.platform.startswith("win"):
+            subprocess.Popen([installer_path], close_fds=True,
+                              creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        else:
+            subprocess.Popen([installer_path], close_fds=True)
+        _update_install_state = {"stage": "done", "percent": 100, "error": None}
+    except Exception as e:
+        _update_install_state = {"stage": "error", "percent": 0, "error": str(e)}
+
+
+@app.route("/api/app_update/check")
+def api_app_update_check():
+    return jsonify(check_for_update())
+
+
+@app.route("/api/app_update/install", methods=["POST"])
+def api_app_update_install():
+    data = request.json or {}
+    download_url = data.get("download_url")
+    asset_name = data.get("asset_name")
+    if not download_url:
+        return jsonify({"error": "missing_download_url"}), 400
+    if _update_install_state["stage"] in ("downloading", "launching"):
+        return jsonify({"error": "already_running"}), 409
+    threading.Thread(target=_run_update_download_and_launch,
+                      args=(download_url, asset_name), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/app_update/install_status")
+def api_app_update_install_status():
+    return jsonify(_update_install_state)
+
+
 PAGE = """
 <!DOCTYPE html>
 <html lang="en" dir="ltr">
@@ -2426,6 +2582,11 @@ PAGE = """
   .appearance-row{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
   .icon-preview{width:48px;height:48px;border-radius:10px;object-fit:cover;border:1px solid var(--line);background:var(--bg-elev)}
   .appearance-status{font-size:.8rem;color:var(--ink-dim)}
+  .update-notes{margin-top:10px;font-size:.8rem;color:var(--ink-dim);white-space:pre-wrap;max-height:120px;overflow-y:auto;background:var(--bg-elev);border:1px solid var(--line);border-radius:8px;padding:10px}
+  .update-progress-wrap{margin-top:12px}
+  .update-progress-bar{width:100%;max-width:360px;height:8px;border-radius:5px;background:var(--bg-elev-2);overflow:hidden}
+  .update-progress-fill{height:100%;width:0%;background:var(--teal);transition:width .2s ease}
+  .update-progress-label{margin-top:6px}
   .category-box-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:14px;margin-top:24px}
   .category-box{min-height:125px;background:linear-gradient(145deg,var(--bg-elev),var(--bg-elev-2));border:1px solid var(--line);border-radius:13px;padding:18px;cursor:pointer;text-align:left;transition:transform .15s,border-color .15s,background .15s}
   .category-box:hover{transform:translateY(-2px);border-color:rgba(var(--accent-rgb),.75);background:var(--bg-elev-2)}
@@ -2756,6 +2917,21 @@ PAGE = """
         </div>
         <div class="appearance-status" id="iconStatus"></div>
       </div>
+
+      <div class="appearance-block">
+        <h2 class="appearance-block-title">App updates</h2>
+        <div class="section-note">Current version: <strong id="updateCurrentVersion">—</strong></div>
+        <div class="appearance-row">
+          <button type="button" class="small-btn" id="checkUpdateBtn">Check for updates</button>
+          <button type="button" class="small-btn btn-save" id="installUpdateBtn" style="display:none">Update now</button>
+          <span class="appearance-status" id="updateStatus"></span>
+        </div>
+        <div class="update-notes" id="updateNotes" style="display:none"></div>
+        <div class="update-progress-wrap" id="updateProgressWrap" style="display:none">
+          <div class="update-progress-bar"><div class="update-progress-fill" id="updateProgressFill"></div></div>
+          <div class="appearance-status" id="updateProgressLabel"></div>
+        </div>
+      </div>
     </section>
 
     <section class="edit-page" id="editPage">
@@ -2857,6 +3033,8 @@ const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommend
 const themesPage=$('themesPage'), themeGrid=$('themeGrid');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
 const iconPreview=$('iconPreview'), iconChooseBtn=$('iconChooseBtn'), iconFileInput=$('iconFileInput'), iconResetBtn=$('iconResetBtn'), iconStatus=$('iconStatus');
+const updateCurrentVersion=$('updateCurrentVersion'), checkUpdateBtn=$('checkUpdateBtn'), installUpdateBtn=$('installUpdateBtn'), updateStatus=$('updateStatus'), updateNotes=$('updateNotes');
+const updateProgressWrap=$('updateProgressWrap'), updateProgressFill=$('updateProgressFill'), updateProgressLabel=$('updateProgressLabel');
 const localPage=$('localPage');
 const localExePath=$('localExePath'), localBrowseBtn=$('localBrowseBtn'), localAddBtn=$('localAddBtn'), localAddError=$('localAddError');
 const localFolderPath=$('localFolderPath'), localFolderBrowseBtn=$('localFolderBrowseBtn'), localFolderAddBtn=$('localFolderAddBtn'), localFoldersList=$('localFoldersList'), localScanBtn=$('localScanBtn');
@@ -3404,6 +3582,7 @@ function showThemes(){
   navThemes.classList.add('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
+  refreshUpdateInfo(false);
 }
 
 // ---------- Themes ----------
@@ -3571,6 +3750,120 @@ if(themeImageBtn)themeImageBtn.onclick=async()=>{
     themeImageStatus.textContent=`Theme set from picture (${data.hex}).`;
   }catch(e){
     themeImageStatus.textContent='Could not set a theme from that picture.';
+  }
+};
+
+// ---------- App updates ----------
+// Mirrors the app-icon/theme-from-picture pattern above: a button kicks
+// off a fetch to the backend routes added in the previous step, and the
+// result (or a plain-language error) lands in a status line next to it.
+let _latestUpdateInfo=null;
+let _updatePollTimer=null;
+
+function formatUpdateCheckError(data){
+  const messages={
+    no_releases:'No releases published yet.',
+    network:'Could not reach GitHub. Check your connection.',
+  };
+  return messages[data.error]||'Could not check for updates.';
+}
+
+async function refreshUpdateInfo(userInitiated){
+  if(userInitiated){
+    checkUpdateBtn.disabled=true;
+    checkUpdateBtn.textContent='Checking...';
+    updateStatus.textContent='';
+    installUpdateBtn.style.display='none';
+    updateNotes.style.display='none';
+  }
+  try{
+    const res=await fetch('/api/app_update/check');
+    const data=await res.json();
+    _latestUpdateInfo=data;
+    if(updateCurrentVersion)updateCurrentVersion.textContent=data.current_version||'—';
+    if(!data.ok){
+      updateStatus.textContent=formatUpdateCheckError(data);
+      return;
+    }
+    if(data.update_available){
+      updateStatus.textContent=`Update available: v${data.latest_version}`;
+      installUpdateBtn.style.display='';
+      installUpdateBtn.disabled=false;
+      installUpdateBtn.textContent=`Update to v${data.latest_version}`;
+      if(data.notes){
+        updateNotes.textContent=data.notes;
+        updateNotes.style.display='block';
+      }else{
+        updateNotes.style.display='none';
+      }
+    }else{
+      updateStatus.textContent="You're on the latest version.";
+      installUpdateBtn.style.display='none';
+      updateNotes.style.display='none';
+    }
+  }catch(e){
+    updateStatus.textContent='Could not check for updates.';
+  }finally{
+    if(userInitiated){
+      checkUpdateBtn.disabled=false;
+      checkUpdateBtn.textContent='Check for updates';
+    }
+  }
+}
+
+if(checkUpdateBtn)checkUpdateBtn.onclick=()=>refreshUpdateInfo(true);
+
+function setUpdateProgress(stage,percent){
+  updateProgressWrap.style.display='block';
+  updateProgressFill.style.width=(percent||0)+'%';
+  const labels={
+    downloading:`Downloading update... ${percent||0}%`,
+    launching:'Starting installer...',
+    done:'Installer launched. GameVault will restart shortly.',
+  };
+  updateProgressLabel.textContent=labels[stage]||'';
+}
+
+async function pollInstallStatus(){
+  try{
+    const res=await fetch('/api/app_update/install_status');
+    const data=await res.json();
+    if(data.stage==='error'){
+      updateProgressLabel.textContent=`Update failed: ${data.error||'unknown error'}`;
+      installUpdateBtn.disabled=false;
+      return;
+    }
+    setUpdateProgress(data.stage,data.percent);
+    if(data.stage==='downloading'||data.stage==='launching'){
+      _updatePollTimer=setTimeout(pollInstallStatus,600);
+    }else if(data.stage==='done'){
+      installUpdateBtn.disabled=false;
+    }
+  }catch(e){
+    installUpdateBtn.disabled=false;
+  }
+}
+
+if(installUpdateBtn)installUpdateBtn.onclick=async()=>{
+  if(!_latestUpdateInfo||!_latestUpdateInfo.download_url)return;
+  clearTimeout(_updatePollTimer);
+  installUpdateBtn.disabled=true;
+  updateStatus.textContent='';
+  try{
+    const res=await fetch('/api/app_update/install',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({download_url:_latestUpdateInfo.download_url,asset_name:_latestUpdateInfo.asset_name})});
+    const data=await res.json();
+    if(!res.ok){
+      updateProgressWrap.style.display='block';
+      updateProgressLabel.textContent=data.error==='already_running'?'An update is already in progress.':'Could not start the update.';
+      installUpdateBtn.disabled=false;
+      return;
+    }
+    setUpdateProgress('downloading',0);
+    pollInstallStatus();
+  }catch(e){
+    installUpdateBtn.disabled=false;
+    updateProgressWrap.style.display='block';
+    updateProgressLabel.textContent='Could not start the update.';
   }
 };
 
