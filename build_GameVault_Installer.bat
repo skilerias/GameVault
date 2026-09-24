@@ -86,12 +86,19 @@ if not defined ISCC (
 
 echo Found: %ISCC%
 
+REM Every build gets a new version number (year.month.day.HHmm) so the
+REM installer knows it is an UPDATE when GameVault is already installed.
+set "APPVER="
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyy.M.d.HHmm"') do set "APPVER=%%i"
+if not defined APPVER set "APPVER=1.0.0"
+echo Version: %APPVER%
+
 echo.
 echo [5/5] Building GameVault_Setup.exe...
 if exist installer rmdir /s /q installer
 mkdir installer
 
-"%ISCC%" "GameVault.iss"
+"%ISCC%" /DMyAppVersion=%APPVER% "GameVault.iss"
 if errorlevel 1 (
     echo.
     echo ERROR: Inno Setup failed.

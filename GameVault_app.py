@@ -2475,7 +2475,7 @@ PAGE = """
   .qb.playtime{color:var(--gold)}
   .info{padding:10px 12px;display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:4px 8px;align-items:center;background:var(--bg-elev);border-radius:0 0 10px 10px}
   .name{grid-column:1/-1;font-weight:600;font-size:.92rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .price{color:var(--gold);font-weight:700;direction:ltr;text-align:left}
+  .price{color:var(--gold);font-weight:700;direction:ltr;text-align:left;min-width:0;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   /* Fixed width (instead of auto/content-based) on purpose: every state
      this button cycles through ("▶ Play", "■ Stop", "Launching…",
      "Stopping…") renders at the exact same box size, so swapping the label
@@ -2581,7 +2581,7 @@ PAGE = """
   .category-checks{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
   .category-check{display:flex;align-items:center;gap:6px;background:var(--bg-elev-2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:.8rem;color:var(--ink)}
   .category-check input{margin:0}
-  .total-sub{font-size:.75rem;color:var(--ink-dim);margin-top:4px}
+  .total-sub{font-size:.75rem;color:var(--ink-dim);margin-top:4px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
@@ -3053,6 +3053,7 @@ function renderGameCards(target,games,sortMode){
   sorted.forEach(g=>{
     const hasRating=g.rating!==null&&g.rating!==undefined;
     const cats=steamCategories(g);
+    const dlcCount=(g.dlcs||[]).length;
     const card=document.createElement('div');
     card.className='card';
     card.innerHTML=`
@@ -3066,7 +3067,7 @@ function renderGameCards(target,games,sortMode){
       </div>
       <div class="info">
         <div class="name">${g.name}</div>
-        <div class="price">${(g.source==='local'&&!g.steam_appid)?'Owned':fmt(gameTotal(g),dlcCurrency(g))}<div class="total-sub"${(g.dlcs||[]).length?'':' style="visibility:hidden"'}>Base + ${(g.dlcs||[]).length||1} DLC</div></div>
+        <div class="price">${(g.source==='local'&&!g.steam_appid)?'Owned':fmt(gameTotal(g),dlcCurrency(g))}<div class="total-sub"${dlcCount?'':' style="visibility:hidden"'} title="Base game + ${dlcCount||1} DLC included in this price">+${dlcCount||1} DLC</div></div>
         ${playBtnMarkup(g.appid,g.name)}
         <button class="edit-btn" title="Edit ${g.name}" aria-label="Edit ${g.name}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
