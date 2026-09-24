@@ -132,6 +132,9 @@ echo ==========================================
 echo SUCCESS!
 echo Installer:
 echo %CD%\installer\GameVault_Setup.exe
+echo Version inside it: %APPVER%
+echo If you publish it by hand on GitHub: use tag v%APPVER%
+echo (change the VERSION file BEFORE building, or the installer keeps the old number)
 echo ==========================================
 echo.
 pause

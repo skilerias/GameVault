@@ -2362,7 +2362,7 @@ def api_theme_from_image():
 # in place (same folder, same shortcuts, library/settings untouched) --
 # see GameVault.iss for that half of the flow. This just finds and runs it.
 GITHUB_UPDATE_REPO = "skilerias/GameVault"
-GITHUB_API_RELEASES_LATEST = f"https://api.github.com/repos/{GITHUB_UPDATE_REPO}/releases/latest"
+GITHUB_API_RELEASES = f"https://api.github.com/repos/{GITHUB_UPDATE_REPO}/releases"
 
 
 # Must match AppId in GameVault.iss (Inno writes DisplayVersion under it).
@@ -2471,42 +2471,88 @@ def _version_is_newer(latest, current):
 _update_install_state = {"stage": "idle", "percent": 0, "error": None}
 
 
+def _version_sort_key(v):
+    t = _version_tuple(v)
+    return t + (0,) * (8 - len(t))
+
+
+def _installer_asset_of(release):
+    """The installer asset -- whatever .exe the release has attached."""
+    for a in (release.get("assets") or []):
+        if str(a.get("name", "")).lower().endswith(".exe"):
+            return a
+    return None
+
+
 def check_for_update(timeout=8):
-    """Ask GitHub for GITHUB_UPDATE_REPO's latest release and compare it to
-    the running version. Returns a plain dict and never raises -- network
-    problems, a repo with no releases yet, etc. all come back as a normal
-    {"ok": False, ...} result the caller can show in the UI."""
+    """Look through GITHUB_UPDATE_REPO's releases and compare the newest
+    usable one to the running version. Returns a plain dict and never
+    raises -- network problems, a repo with no releases yet, etc. all come
+    back as a normal {"ok": False, ...} result the caller can show in the UI.
+
+    Looks at the whole release list (not just GitHub's "latest" pointer, which
+    depends on creation date and ignores pre-releases) and picks the highest
+    version that has an installer .exe attached. Newer releases that had to
+    be skipped are reported in "skipped_newer" with the reason, instead of
+    silently saying "you're on the latest version".
+    """
+    base = {"current_version": APP_VERSION}
     try:
         resp = requests.get(
-            GITHUB_API_RELEASES_LATEST,
+            GITHUB_API_RELEASES,
+            params={"per_page": 30},
             headers={"Accept": "application/vnd.github+json"},
             timeout=timeout,
         )
         if resp.status_code == 404:
-            return {"ok": False, "error": "no_releases", "current_version": APP_VERSION}
+            return {"ok": False, "error": "no_releases", **base}
         resp.raise_for_status()
-        release = resp.json()
-        latest_version = release.get("tag_name") or ""
-        assets = release.get("assets") or []
-        # The installer asset -- whatever .exe the release has attached.
-        installer_asset = next(
-            (a for a in assets if str(a.get("name", "")).lower().endswith(".exe")),
-            None,
-        )
-        return {
+        releases = [r for r in (resp.json() or []) if not r.get("draft")]
+        if not releases:
+            return {"ok": False, "error": "no_releases", **base}
+
+        usable, skipped = [], []
+        for r in releases:
+            tag = r.get("tag_name") or ""
+            asset = _installer_asset_of(r)
+            if r.get("prerelease"):
+                reason = "is marked as a pre-release"
+            elif not asset:
+                reason = "has no installer (.exe) attached"
+            else:
+                reason = None
+            if reason is None:
+                usable.append((r, asset))
+            elif _version_is_newer(tag, APP_VERSION):
+                skipped.append({"tag": tag, "reason": reason})
+
+        result = {
+            **base,
             "ok": True,
-            "current_version": APP_VERSION,
-            "latest_version": latest_version,
-            "update_available": bool(installer_asset) and _version_is_newer(latest_version, APP_VERSION),
-            "notes": release.get("body") or "",
-            "download_url": installer_asset.get("browser_download_url") if installer_asset else None,
-            "asset_name": installer_asset.get("name") if installer_asset else None,
-            "release_url": release.get("html_url"),
+            "latest_version": "",
+            "update_available": False,
+            "notes": "",
+            "download_url": None,
+            "asset_name": None,
+            "release_url": None,
+            "skipped_newer": skipped,
         }
+        if usable:
+            best, asset = max(usable, key=lambda ra: _version_sort_key(ra[0].get("tag_name")))
+            latest_version = best.get("tag_name") or ""
+            result.update({
+                "latest_version": latest_version,
+                "update_available": _version_is_newer(latest_version, APP_VERSION),
+                "notes": best.get("body") or "",
+                "download_url": asset.get("browser_download_url"),
+                "asset_name": asset.get("name"),
+                "release_url": best.get("html_url"),
+            })
+        return result
     except requests.RequestException as e:
-        return {"ok": False, "error": "network", "detail": str(e), "current_version": APP_VERSION}
+        return {"ok": False, "error": "network", "detail": str(e), **base}
     except Exception as e:
-        return {"ok": False, "error": "unexpected", "detail": str(e), "current_version": APP_VERSION}
+        return {"ok": False, "error": "unexpected", "detail": str(e), **base}
 
 
 def _run_update_download_and_launch(download_url, asset_name):
@@ -3857,7 +3903,12 @@ async function refreshUpdateInfo(userInitiated){
         updateNotes.style.display='none';
       }
     }else{
-      updateStatus.textContent="You're on the latest version.";
+      if(data.skipped_newer&&data.skipped_newer.length){
+        const sk=data.skipped_newer[0];
+        updateStatus.textContent=`Found ${sk.tag} on GitHub, but it can't be offered: it ${sk.reason}.`;
+      }else{
+        updateStatus.textContent="You're on the latest version.";
+      }
       installUpdateBtn.style.display='none';
       updateNotes.style.display='none';
     }
