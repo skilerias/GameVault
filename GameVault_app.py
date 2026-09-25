@@ -116,6 +116,7 @@ DLC_CACHE_FILE = _data_file("dlc_cache.json")
 DLC_CACHE_TTL = 6 * 60 * 60
 CATEGORIES_FILE = _data_file("categories.json")
 LOCAL_FOLDERS_FILE = _data_file("local_folders.json")
+WALLPAPER_FILE = _data_file("wallpaper.json")
 
 
 # ---------- app icon ----------
@@ -2679,6 +2680,279 @@ def api_theme_from_image():
     return jsonify({"ok": True, "hex": hex_color})
 
 
+# ---------- live wallpaper (Main Menu background) ----------
+# Lets the user point GameVault at a Wallpaper Engine wallpaper folder (the
+# kind Steam Workshop downloads into
+# .../steamapps/workshop/content/431960/<id>/, or one of your own under
+# Wallpaper Engine's "myprojects" folder) and shows it, moving, behind the
+# Main Menu buttons. Wallpaper Engine's own "scene" (.pkg, built with its
+# editor) and "application" wallpapers use a proprietary renderer we can't
+# reproduce here, so for those we fall back to their static preview image
+# instead of playing them. The two wallpaper kinds that are just a plain
+# video file or a plain HTML/JS/CSS animation ("video" and "web" types, the
+# large majority of what people actually use as a moving desktop
+# background) play back for real using a normal <video> tag or a sandboxed
+# <iframe>. A single video or image file with no project.json at all is
+# also supported directly, for people who just want any local video as a
+# moving background without going through Wallpaper Engine.
+WALLPAPER_VIDEO_EXTS = {".mp4", ".webm", ".ogg", ".ogv", ".m4v", ".mov"}
+WALLPAPER_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+
+_WALLPAPER_DEFAULTS = {
+    "enabled": False,
+    "mode": None,          # "project" (Wallpaper Engine folder) or "file" (plain video/image)
+    "root": None,          # absolute folder the entry/preview paths are relative to
+    "entry": None,         # relative path (from root) to the playable asset
+    "preview": None,       # relative path (from root) to a static preview image, if any
+    "wp_type": None,       # "video" | "web" | "image" | "scene" | "application" | "unknown"
+    "renderable": False,   # can we actually play "entry", or only show "preview"?
+    "title": None,
+    "muted": True,
+    "volume": 50,
+    "fit": "cover",        # "cover" or "contain"
+}
+
+
+def _load_wallpaper_settings():
+    try:
+        with open(WALLPAPER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            merged = dict(_WALLPAPER_DEFAULTS)
+            merged.update(data)
+            return merged
+    except (OSError, ValueError):
+        pass
+    return dict(_WALLPAPER_DEFAULTS)
+
+
+def _save_wallpaper_settings(settings):
+    try:
+        with open(WALLPAPER_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f)
+    except OSError:
+        pass
+
+
+def _wallpaper_safe_path(root, relpath):
+    """Resolve relpath against root and make sure the result can't escape
+    root via '..' or an absolute path — this backs the two routes below
+    that serve arbitrary files out of a user-chosen folder."""
+    if not root or not relpath:
+        return None
+    relpath = relpath.replace("\\", "/").lstrip("/")
+    candidate = os.path.normpath(os.path.join(root, relpath))
+    root_norm = os.path.normpath(root)
+    if candidate != root_norm and not candidate.startswith(root_norm + os.sep):
+        return None
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _parse_wallpaper_project(folder):
+    """Read a Wallpaper Engine wallpaper folder's project.json and figure
+    out what we can do with it. Returns (settings_updates, error)."""
+    project_path = os.path.join(folder, "project.json")
+    if not os.path.isfile(project_path):
+        return None, "no_project_json"
+    raw = None
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            with open(project_path, "r", encoding=encoding) as f:
+                raw = json.load(f)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
+    if raw is None or not isinstance(raw, dict):
+        return None, "bad_project_json"
+
+    src_type = str(raw.get("type") or "").strip().lower()
+    entry = raw.get("file")
+    preview = raw.get("preview")
+    title = raw.get("title") or os.path.basename(os.path.normpath(folder))
+
+    entry_abs = _wallpaper_safe_path(folder, entry) if entry else None
+    preview_abs = _wallpaper_safe_path(folder, preview) if preview else None
+
+    if src_type == "video" and entry_abs:
+        wp_type, renderable = "video", os.path.splitext(entry_abs)[1].lower() in WALLPAPER_VIDEO_EXTS
+    elif src_type == "web" and entry_abs:
+        wp_type, renderable = "web", True
+    elif src_type in ("scene", "application", "preset"):
+        wp_type, renderable = (src_type or "scene"), False
+    else:
+        # Unrecognized/missing "type" — still usable if "file" happens to
+        # point at something a <video>/<img> tag can just play directly.
+        ext = os.path.splitext(entry_abs)[1].lower() if entry_abs else ""
+        if ext in WALLPAPER_VIDEO_EXTS:
+            wp_type, renderable = "video", True
+        elif ext in WALLPAPER_IMAGE_EXTS:
+            wp_type, renderable = "image", True
+        else:
+            wp_type, renderable = "unknown", False
+
+    if not renderable and not preview_abs:
+        return None, "unsupported_no_preview"
+
+    updates = dict(_WALLPAPER_DEFAULTS)
+    updates.update({
+        "enabled": True,
+        "mode": "project",
+        "root": os.path.normpath(folder),
+        "entry": entry.replace("\\", "/") if (entry and renderable) else None,
+        "preview": preview.replace("\\", "/") if preview_abs else None,
+        "wp_type": wp_type,
+        "renderable": renderable,
+        "title": title,
+    })
+    return updates, None
+
+
+def _parse_wallpaper_file(path):
+    """A single video/image file picked directly, no project.json."""
+    if not os.path.isfile(path):
+        return None, "not_found"
+    ext = os.path.splitext(path)[1].lower()
+    if ext in WALLPAPER_VIDEO_EXTS:
+        wp_type = "video"
+    elif ext in WALLPAPER_IMAGE_EXTS:
+        wp_type = "image"
+    else:
+        return None, "unsupported_file_type"
+    updates = dict(_WALLPAPER_DEFAULTS)
+    updates.update({
+        "enabled": True,
+        "mode": "file",
+        "root": os.path.dirname(os.path.normpath(path)),
+        "entry": os.path.basename(path),
+        "preview": None,
+        "wp_type": wp_type,
+        "renderable": True,
+        "title": os.path.splitext(os.path.basename(path))[0],
+    })
+    return updates, None
+
+
+def _wallpaper_public_state(settings):
+    """What the front end gets — no raw filesystem paths, just ready-to-use
+    URLs and playback flags."""
+    has_asset = bool(settings.get("renderable") and settings.get("root") and settings.get("entry"))
+    has_preview = bool(settings.get("root") and settings.get("preview"))
+    return {
+        "enabled": bool(settings.get("enabled")) and (has_asset or has_preview),
+        "mode": settings.get("mode"),
+        "wp_type": settings.get("wp_type"),
+        "renderable": has_asset,
+        "title": settings.get("title"),
+        "muted": bool(settings.get("muted", True)),
+        "volume": int(settings.get("volume", 50) or 0),
+        "fit": settings.get("fit") or "cover",
+        "asset_url": ("/api/wallpaper/asset?v=%d" % int(time.time())) if has_asset and settings.get("wp_type") in ("video", "image") else None,
+        "web_url": ("/api/wallpaper/webasset/" + settings["entry"]) if has_asset and settings.get("wp_type") == "web" else None,
+        "preview_url": ("/api/wallpaper/preview?v=%d" % int(time.time())) if has_preview else None,
+    }
+
+
+@app.route("/api/wallpaper/state")
+def api_wallpaper_state():
+    return jsonify(_wallpaper_public_state(_load_wallpaper_settings()))
+
+
+@app.route("/api/wallpaper/folder", methods=["POST"])
+def api_wallpaper_folder():
+    """Set the live wallpaper from a Wallpaper Engine wallpaper folder
+    (must contain a project.json)."""
+    data = request.get_json(silent=True) or {}
+    folder = data.get("path")
+    if not folder or not os.path.isdir(folder):
+        return jsonify({"error": "not_found"}), 400
+    updates, err = _parse_wallpaper_project(folder)
+    if err:
+        return jsonify({"error": err}), 400
+    settings = _load_wallpaper_settings()
+    settings.update(updates)
+    _save_wallpaper_settings(settings)
+    return jsonify({"ok": True, "state": _wallpaper_public_state(settings)})
+
+
+@app.route("/api/wallpaper/file", methods=["POST"])
+def api_wallpaper_file():
+    """Set the live wallpaper from a single local video or image file."""
+    data = request.get_json(silent=True) or {}
+    path = data.get("path")
+    if not path:
+        return jsonify({"error": "missing_path"}), 400
+    updates, err = _parse_wallpaper_file(path)
+    if err:
+        return jsonify({"error": err}), 400
+    settings = _load_wallpaper_settings()
+    settings.update(updates)
+    _save_wallpaper_settings(settings)
+    return jsonify({"ok": True, "state": _wallpaper_public_state(settings)})
+
+
+@app.route("/api/wallpaper/settings", methods=["POST"])
+def api_wallpaper_settings():
+    """Update playback prefs (enabled/muted/volume/fit) without touching
+    which wallpaper is selected."""
+    data = request.get_json(silent=True) or {}
+    settings = _load_wallpaper_settings()
+    if settings.get("mode") is None and data.get("enabled"):
+        return jsonify({"error": "no_wallpaper_set"}), 400
+    for key in ("enabled", "muted", "fit"):
+        if key in data:
+            settings[key] = bool(data[key]) if key != "fit" else data[key]
+    if "volume" in data:
+        try:
+            settings["volume"] = max(0, min(100, int(data["volume"])))
+        except (TypeError, ValueError):
+            pass
+    _save_wallpaper_settings(settings)
+    return jsonify({"ok": True, "state": _wallpaper_public_state(settings)})
+
+
+@app.route("/api/wallpaper/clear", methods=["POST"])
+def api_wallpaper_clear():
+    _save_wallpaper_settings(dict(_WALLPAPER_DEFAULTS))
+    return jsonify({"ok": True, "state": _wallpaper_public_state(dict(_WALLPAPER_DEFAULTS))})
+
+
+@app.route("/api/wallpaper/asset")
+def api_wallpaper_asset():
+    settings = _load_wallpaper_settings()
+    if not settings.get("renderable") or settings.get("wp_type") not in ("video", "image"):
+        return jsonify({"error": "no_asset"}), 404
+    path = _wallpaper_safe_path(settings.get("root"), settings.get("entry"))
+    if not path:
+        return jsonify({"error": "not_found"}), 404
+    from flask import send_file
+    return send_file(path, conditional=True)
+
+
+@app.route("/api/wallpaper/webasset/<path:relpath>")
+def api_wallpaper_webasset(relpath):
+    """Serves any file inside the currently-selected wallpaper folder, so a
+    'web' type wallpaper's index.html can load its own relative css/js/img
+    assets normally through an <iframe>."""
+    settings = _load_wallpaper_settings()
+    if settings.get("mode") != "project" or settings.get("wp_type") != "web":
+        return jsonify({"error": "no_web_wallpaper"}), 404
+    path = _wallpaper_safe_path(settings.get("root"), relpath)
+    if not path:
+        return jsonify({"error": "not_found"}), 404
+    from flask import send_file
+    return send_file(path, conditional=True)
+
+
+@app.route("/api/wallpaper/preview")
+def api_wallpaper_preview():
+    settings = _load_wallpaper_settings()
+    path = _wallpaper_safe_path(settings.get("root"), settings.get("preview"))
+    if not path:
+        return jsonify({"error": "not_found"}), 404
+    from flask import send_file
+    return send_file(path, conditional=True)
+
+
 # ---------- self-update (from GitHub Releases) ----------
 # Where updates are published. GameVault.iss's AppId never changes, so a
 # newer GameVault_Setup.exe run on top of an existing install upgrades it
@@ -3042,9 +3316,15 @@ PAGE = """
   .category-count{font-size:.7rem;opacity:.7}
   .nav-button{cursor:pointer;text-align:left;font-family:inherit;margin-bottom:8px}
   .nav-button.active{background:rgba(var(--accent-rgb),.24);border-color:rgba(var(--accent-rgb),.65)}
-  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center}
+  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center;position:relative;overflow:hidden;border-radius:18px}
   .main-menu-page.active{display:flex}
-  .main-menu-grid{display:grid;grid-template-columns:repeat(2,minmax(170px,1fr));gap:16px;width:100%;max-width:560px}
+  .main-menu-wallpaper{display:none;position:absolute;inset:0;z-index:0;background:#000;border-radius:18px;overflow:hidden}
+  .main-menu-wallpaper.active{display:block}
+  .main-menu-wallpaper video,.main-menu-wallpaper img,.main-menu-wallpaper iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none}
+  .main-menu-wallpaper video.fit-cover,.main-menu-wallpaper img.fit-cover{object-fit:cover}
+  .main-menu-wallpaper video.fit-contain,.main-menu-wallpaper img.fit-contain{object-fit:contain}
+  .main-menu-wallpaper-overlay{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,12,16,.55),rgba(10,12,16,.72));pointer-events:none}
+  .main-menu-grid{position:relative;z-index:1;display:grid;grid-template-columns:repeat(2,minmax(170px,1fr));gap:16px;width:100%;max-width:560px}
   .main-menu-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:30px 16px;background:var(--bg-elev);border:1px solid var(--line);border-radius:14px;color:var(--ink);font:600 .92rem inherit;font-family:inherit;cursor:pointer;text-align:center;transition:border-color .15s ease,transform .15s ease,background .15s ease}
   .main-menu-btn:hover{border-color:rgba(var(--accent-rgb),.65);background:var(--bg-elev-2);transform:translateY(-2px)}
   .main-menu-icon{font-size:1.7rem;color:var(--gold)}
@@ -3263,6 +3543,12 @@ PAGE = """
 
   <main class="wrap">
     <section class="main-menu-page" id="mainMenuPage">
+      <div class="main-menu-wallpaper" id="mainMenuWallpaper">
+        <video id="mainMenuWallpaperVideo" muted playsinline loop></video>
+        <img id="mainMenuWallpaperImg" alt="">
+        <iframe id="mainMenuWallpaperFrame" title="Live wallpaper" frameborder="0" scrolling="no"></iframe>
+        <div class="main-menu-wallpaper-overlay"></div>
+      </div>
       <div class="main-menu-grid">
         <button class="main-menu-btn" id="mmLibrary"><span class="main-menu-icon">＋</span>Add / remove games</button>
         <button class="main-menu-btn" id="mmLocal"><span class="main-menu-icon">📁</span>Local Games</button>
@@ -3409,6 +3695,28 @@ PAGE = """
         </div>
       </div>
       <div class="theme-grid" id="themeGrid"></div>
+
+      <div class="appearance-block">
+        <h2 class="appearance-block-title">Live Wallpaper</h2>
+        <div class="section-note">Play a Wallpaper Engine wallpaper (or any video/image) behind the Main Menu buttons. Wallpaper Engine "scene"/"application" wallpapers can't be animated here — those show their static preview instead.</div>
+        <div class="appearance-row">
+          <button type="button" class="small-btn" id="wallpaperFolderBtn">Choose Wallpaper Engine folder...</button>
+          <button type="button" class="small-btn" id="wallpaperFileBtn">Choose video or image file...</button>
+          <button type="button" class="small-btn btn-cancel" id="wallpaperRemoveBtn">Remove</button>
+        </div>
+        <div class="appearance-status" id="wallpaperStatus">No live wallpaper set.</div>
+        <div class="appearance-row" id="wallpaperControlsRow" style="display:none">
+          <label class="appearance-status" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="wallpaperEnabledCheckbox"> Show on Main Menu</label>
+          <label class="appearance-status" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="wallpaperMutedCheckbox"> Muted</label>
+          <label class="appearance-status" style="display:flex;align-items:center;gap:6px">Volume <input type="range" id="wallpaperVolumeRange" min="0" max="100" style="width:110px"></label>
+          <label class="appearance-status" style="display:flex;align-items:center;gap:6px">Fit
+            <select id="wallpaperFitSelect" class="small-btn" style="cursor:pointer">
+              <option value="cover">Fill (crop)</option>
+              <option value="contain">Fit (letterbox)</option>
+            </select>
+          </label>
+        </div>
+      </div>
 
       <div class="appearance-block">
         <h2 class="appearance-block-title">Theme from a picture</h2>
@@ -3559,6 +3867,9 @@ const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommend
 const themesPage=$('themesPage'), themeGrid=$('themeGrid');
 const settingsPage=$('settingsPage');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
+const mainMenuWallpaper=$('mainMenuWallpaper'), mainMenuWallpaperVideo=$('mainMenuWallpaperVideo'), mainMenuWallpaperImg=$('mainMenuWallpaperImg'), mainMenuWallpaperFrame=$('mainMenuWallpaperFrame');
+const wallpaperFolderBtn=$('wallpaperFolderBtn'), wallpaperFileBtn=$('wallpaperFileBtn'), wallpaperRemoveBtn=$('wallpaperRemoveBtn'), wallpaperStatus=$('wallpaperStatus');
+const wallpaperControlsRow=$('wallpaperControlsRow'), wallpaperEnabledCheckbox=$('wallpaperEnabledCheckbox'), wallpaperMutedCheckbox=$('wallpaperMutedCheckbox'), wallpaperVolumeRange=$('wallpaperVolumeRange'), wallpaperFitSelect=$('wallpaperFitSelect');
 const iconPreview=$('iconPreview'), iconChooseBtn=$('iconChooseBtn'), iconFileInput=$('iconFileInput'), iconResetBtn=$('iconResetBtn'), iconStatus=$('iconStatus');
 const updateCurrentVersion=$('updateCurrentVersion'), checkUpdateBtn=$('checkUpdateBtn'), installUpdateBtn=$('installUpdateBtn'), updateStatus=$('updateStatus'), updateNotes=$('updateNotes');
 const updateProgressWrap=$('updateProgressWrap'), updateProgressFill=$('updateProgressFill'), updateProgressLabel=$('updateProgressLabel');
@@ -4135,6 +4446,7 @@ function showThemes(){
   navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
+  loadWallpaperSettingsIntoThemesPage();
 }
 
 function showSettings(){
@@ -4180,6 +4492,175 @@ function showMainMenu(){
   navMainMenu.classList.add('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
+  loadMainMenuWallpaper();
+}
+
+// ---------- Live Wallpaper (Main Menu background) ----------
+// Mirrors the app-icon/theme-from-picture pattern: native dialogs (added to
+// DesktopApi) hand back a filesystem path, which is posted to the backend;
+// the backend replies with a small "public state" object (URLs + flags,
+// never raw paths) that both the Themes page controls and the Main Menu
+// background renderer below read from.
+function wallpaperErrorMessage(err){
+  const messages={
+    not_found:"That folder couldn't be found.",
+    no_project_json:"That folder doesn't have a project.json in it — pick the wallpaper's own folder (the one project.json sits directly inside).",
+    bad_project_json:"Couldn't read that wallpaper's project.json.",
+    unsupported_no_preview:"That wallpaper type isn't supported here and it has no preview image to fall back to.",
+    missing_path:'Pick a folder or file first.',
+    unsupported_file_type:"That file type isn't supported — pick a video or image file.",
+  };
+  return messages[err]||'Could not load that wallpaper.';
+}
+
+function describeWallpaperState(state){
+  if(!state||!state.mode)return 'No live wallpaper set.';
+  const kindLabel={video:'video',web:'animated wallpaper',image:'image',scene:'Wallpaper Engine scene',application:'Wallpaper Engine application'}[state.wp_type]||state.wp_type||'wallpaper';
+  let text=`Using "${state.title||'Untitled'}" (${kindLabel}).`;
+  if(!state.renderable&&state.preview_url)text+=' This type needs Wallpaper Engine itself to animate, so only its static preview is shown.';
+  return text;
+}
+
+let _wallpaperState=null;
+
+function applyWallpaperState(state){
+  _wallpaperState=state||null;
+  if(!_wallpaperState||!_wallpaperState.mode){
+    wallpaperStatus.textContent='No live wallpaper set.';
+    wallpaperControlsRow.style.display='none';
+  }else{
+    wallpaperStatus.textContent=describeWallpaperState(_wallpaperState);
+    wallpaperControlsRow.style.display='flex';
+    wallpaperEnabledCheckbox.checked=!!_wallpaperState.enabled;
+    wallpaperMutedCheckbox.checked=_wallpaperState.muted!==false;
+    wallpaperMutedCheckbox.disabled=_wallpaperState.wp_type!=='video';
+    wallpaperVolumeRange.value=_wallpaperState.volume!=null?_wallpaperState.volume:50;
+    wallpaperVolumeRange.disabled=_wallpaperState.wp_type!=='video'||wallpaperMutedCheckbox.checked;
+    wallpaperFitSelect.value=_wallpaperState.fit||'cover';
+  }
+  if(mainMenuPage&&mainMenuPage.classList.contains('active'))loadMainMenuWallpaper();
+}
+
+async function loadWallpaperSettingsIntoThemesPage(){
+  try{
+    const res=await fetch('/api/wallpaper/state');
+    applyWallpaperState(await res.json());
+  }catch(e){
+    wallpaperStatus.textContent='No live wallpaper set.';
+  }
+}
+
+async function pushWallpaperSettings(patch){
+  try{
+    const res=await fetch('/api/wallpaper/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    const data=await res.json();
+    if(res.ok)applyWallpaperState(data.state);
+  }catch(e){}
+}
+
+if(wallpaperFolderBtn)wallpaperFolderBtn.onclick=async()=>{
+  if(!(window.pywebview&&window.pywebview.api&&window.pywebview.api.pick_folder)){
+    wallpaperStatus.textContent="Native folder browser isn't available in this mode.";
+    return;
+  }
+  const path=await window.pywebview.api.pick_folder();
+  if(!path)return;
+  wallpaperStatus.textContent='Loading wallpaper...';
+  try{
+    const res=await fetch('/api/wallpaper/folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    const data=await res.json();
+    if(!res.ok){wallpaperStatus.textContent=wallpaperErrorMessage(data.error);return;}
+    applyWallpaperState(data.state);
+  }catch(e){
+    wallpaperStatus.textContent='Could not load that wallpaper.';
+  }
+};
+
+if(wallpaperFileBtn)wallpaperFileBtn.onclick=async()=>{
+  if(!(window.pywebview&&window.pywebview.api&&window.pywebview.api.pick_wallpaper_file)){
+    wallpaperStatus.textContent="Native file browser isn't available in this mode.";
+    return;
+  }
+  const path=await window.pywebview.api.pick_wallpaper_file();
+  if(!path)return;
+  wallpaperStatus.textContent='Loading wallpaper...';
+  try{
+    const res=await fetch('/api/wallpaper/file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    const data=await res.json();
+    if(!res.ok){wallpaperStatus.textContent=wallpaperErrorMessage(data.error);return;}
+    applyWallpaperState(data.state);
+  }catch(e){
+    wallpaperStatus.textContent='Could not load that wallpaper.';
+  }
+};
+
+if(wallpaperRemoveBtn)wallpaperRemoveBtn.onclick=async()=>{
+  wallpaperStatus.textContent='Removing...';
+  try{
+    const res=await fetch('/api/wallpaper/clear',{method:'POST'});
+    const data=await res.json();
+    applyWallpaperState(data.state);
+    wallpaperStatus.textContent='Live wallpaper removed.';
+  }catch(e){
+    wallpaperStatus.textContent='Could not remove the wallpaper.';
+  }
+};
+
+if(wallpaperEnabledCheckbox)wallpaperEnabledCheckbox.onchange=()=>pushWallpaperSettings({enabled:wallpaperEnabledCheckbox.checked});
+if(wallpaperMutedCheckbox)wallpaperMutedCheckbox.onchange=()=>{
+  wallpaperVolumeRange.disabled=wallpaperMutedCheckbox.checked||(_wallpaperState&&_wallpaperState.wp_type!=='video');
+  pushWallpaperSettings({muted:wallpaperMutedCheckbox.checked});
+};
+if(wallpaperVolumeRange)wallpaperVolumeRange.onchange=()=>pushWallpaperSettings({volume:parseInt(wallpaperVolumeRange.value,10)});
+if(wallpaperFitSelect)wallpaperFitSelect.onchange=()=>pushWallpaperSettings({fit:wallpaperFitSelect.value});
+
+// The Main Menu background itself: reads the same /api/wallpaper/state
+// and shows whichever of the <video>/<img>/<iframe> layer fits, or hides
+// the whole layer when no wallpaper is enabled/set.
+async function loadMainMenuWallpaper(){
+  if(!mainMenuWallpaper)return;
+  let state;
+  try{
+    const res=await fetch('/api/wallpaper/state');
+    state=await res.json();
+  }catch(e){
+    mainMenuWallpaper.classList.remove('active');
+    return;
+  }
+  mainMenuWallpaperVideo.style.display='none';
+  mainMenuWallpaperImg.style.display='none';
+  mainMenuWallpaperFrame.style.display='none';
+  try{mainMenuWallpaperVideo.pause();}catch(e){}
+  if(!state.enabled){
+    mainMenuWallpaper.classList.remove('active');
+    return;
+  }
+  const fitClass=state.fit==='contain'?'fit-contain':'fit-cover';
+  mainMenuWallpaperVideo.classList.remove('fit-cover','fit-contain');
+  mainMenuWallpaperImg.classList.remove('fit-cover','fit-contain');
+  mainMenuWallpaperVideo.classList.add(fitClass);
+  mainMenuWallpaperImg.classList.add(fitClass);
+
+  if(state.renderable&&state.wp_type==='video'&&state.asset_url){
+    mainMenuWallpaperVideo.muted=state.muted;
+    mainMenuWallpaperVideo.volume=(state.volume||0)/100;
+    if(mainMenuWallpaperVideo.getAttribute('src')!==state.asset_url)mainMenuWallpaperVideo.setAttribute('src',state.asset_url);
+    mainMenuWallpaperVideo.style.display='block';
+    mainMenuWallpaperVideo.play().catch(()=>{});
+  }else if(state.renderable&&state.wp_type==='image'&&state.asset_url){
+    mainMenuWallpaperImg.src=state.asset_url;
+    mainMenuWallpaperImg.style.display='block';
+  }else if(state.renderable&&state.wp_type==='web'&&state.web_url){
+    if(mainMenuWallpaperFrame.getAttribute('src')!==state.web_url)mainMenuWallpaperFrame.setAttribute('src',state.web_url);
+    mainMenuWallpaperFrame.style.display='block';
+  }else if(state.preview_url){
+    mainMenuWallpaperImg.src=state.preview_url;
+    mainMenuWallpaperImg.style.display='block';
+  }else{
+    mainMenuWallpaper.classList.remove('active');
+    return;
+  }
+  mainMenuWallpaper.classList.add('active');
 }
 
 // ---------- Themes ----------
@@ -5116,6 +5597,8 @@ $('refreshBtn').onclick=async e=>{
 
 initTheme();
 loadCurrentIconPreview();
+loadWallpaperSettingsIntoThemesPage();
+loadMainMenuWallpaper();
 loadGames().then(loadCustomCategories).then(syncRunningStatus);
 loadLocalFolders();
 detectSteamGames(true);  // quiet scan on startup so newly installed Steam games show up automatically
@@ -5209,6 +5692,26 @@ class DesktopApi:
             result = win.create_file_dialog(
                 webview.OPEN_DIALOG,
                 file_types=("Image files (*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp)", "All files (*.*)"),
+            )
+        except Exception:
+            return None
+        return result[0] if result else None
+
+    def pick_wallpaper_file(self):
+        """Native "open file" dialog for the Themes page's "Live Wallpaper"
+        picker, for choosing a single video or image file directly (no
+        Wallpaper Engine project.json needed). Returns the chosen path, or
+        None if cancelled / unavailable."""
+        if not webview.windows:
+            return None
+        win = webview.windows[0]
+        try:
+            result = win.create_file_dialog(
+                webview.OPEN_DIALOG,
+                file_types=(
+                    "Video/image files (*.mp4;*.webm;*.ogv;*.m4v;*.mov;*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp)",
+                    "All files (*.*)",
+                ),
             )
         except Exception:
             return None
