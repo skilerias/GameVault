@@ -2985,8 +2985,10 @@ PAGE = """
   body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI",Tahoma,Geneva,sans-serif}
   .app-shell{min-height:100vh;display:grid;grid-template-columns:210px minmax(0,1fr);transition:grid-template-columns .22s ease}
   .app-shell.nav-hidden{grid-template-columns:0 minmax(0,1fr)}
-  .side-nav{background:#10141a;border-right:1px solid var(--line);padding:18px 10px;overflow-x:hidden;overflow-y:auto;transition:opacity .18s ease,padding .22s ease,border .22s ease;position:sticky;top:0;align-self:start;max-height:100vh;z-index:30}
+  .side-nav{background:#10141a;border-right:1px solid var(--line);padding:18px 10px;overflow-x:hidden;overflow-y:auto;transition:opacity .18s ease,padding .22s ease,border .22s ease;position:sticky;top:0;align-self:start;height:100vh;display:flex;flex-direction:column;z-index:30}
   .app-shell.nav-hidden .side-nav{opacity:0;padding-left:0;padding-right:0;border-right:0}
+  .side-nav-inner{width:100%}
+  .side-nav-bottom{width:100%;margin-top:auto;padding-top:14px;border-top:1px solid var(--line)}
   .side-nav-top{display:flex;justify-content:flex-end;margin-bottom:22px}
   /* fixed (not absolute): these stay pinned to the viewport instead of
      scrolling away with the page when you scroll down */
@@ -3005,6 +3007,13 @@ PAGE = """
   .category-count{font-size:.7rem;opacity:.7}
   .nav-button{cursor:pointer;text-align:left;font-family:inherit;margin-bottom:8px}
   .nav-button.active{background:rgba(var(--accent-rgb),.24);border-color:rgba(var(--accent-rgb),.65)}
+  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center}
+  .main-menu-page.active{display:flex}
+  .main-menu-grid{display:grid;grid-template-columns:repeat(2,minmax(170px,1fr));gap:16px;width:100%;max-width:560px}
+  .main-menu-btn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:30px 16px;background:var(--bg-elev);border:1px solid var(--line);border-radius:14px;color:var(--ink);font:600 .92rem inherit;font-family:inherit;cursor:pointer;text-align:center;transition:border-color .15s ease,transform .15s ease,background .15s ease}
+  .main-menu-btn:hover{border-color:rgba(var(--accent-rgb),.65);background:var(--bg-elev-2);transform:translateY(-2px)}
+  .main-menu-icon{font-size:1.7rem;color:var(--gold)}
+  @media(max-width:520px){.main-menu-grid{grid-template-columns:1fr}}
   .library-toolbar{display:flex;align-items:center;justify-content:space-between;margin:22px 0 12px;gap:12px}
   .local-add-row{display:flex;align-items:center;gap:10px;margin-top:16px;flex-wrap:wrap}
   .local-add-row #localExePath{flex:2;min-width:220px}
@@ -3152,7 +3161,9 @@ PAGE = """
   .category-desc{color:var(--ink-dim);font-size:.78rem;margin-top:7px}
   @media(max-width:760px){
     .app-shell,.app-shell.nav-hidden{grid-template-columns:1fr}
-    .side-nav{border-right:0;border-bottom:1px solid var(--line);padding:9px 14px;display:flex;align-items:flex-start;gap:12px;max-height:none}
+    .side-nav{border-right:0;border-bottom:1px solid var(--line);padding:9px 14px;display:flex;flex-direction:row;align-items:center;gap:12px;height:auto;overflow:visible}
+    .side-nav-inner{display:flex;align-items:center;gap:10px;width:auto;flex:1;overflow-x:auto}
+    .side-nav-bottom{width:auto;margin-top:0;margin-left:auto;padding-top:0;padding-left:12px;border-top:0;border-left:1px solid var(--line)}
     .side-nav-top{margin:0}
     .nav-item{width:auto}
     .category-nav{position:absolute;left:0;right:0;top:66px;background:#10141a;border-bottom:1px solid var(--line);padding:8px 14px;z-index:20;display:flex;overflow-x:auto}
@@ -3201,18 +3212,32 @@ PAGE = """
 
 <div class="app-shell" id="appShell">
   <aside class="side-nav">
-    <div style="width:100%">
+    <div class="side-nav-inner">
       <div class="side-nav-top"></div>
+      <button class="nav-item nav-button" id="navMainMenu"><span class="nav-icon">⌂</span><span class="nav-text">Main Menu</span></button>
       <button class="nav-item nav-button active" id="navLibrary"><span class="nav-icon">＋</span><span class="nav-text">Add / remove games</span></button>
       <button class="nav-item nav-button" id="navLocal"><span class="nav-icon">📁</span><span class="nav-text">Local Games</span></button>
       <button class="nav-item nav-button" id="navCategories"><span class="nav-icon">▦</span><span class="nav-text">Categories</span></button>
       <button class="nav-item nav-button" id="navRecommendations"><span class="nav-icon">✦</span><span class="nav-text">Recommendations</span></button>
       <button class="nav-item nav-button" id="navThemes"><span class="nav-icon">🎨</span><span class="nav-text">Themes</span></button>
+    </div>
+    <div class="side-nav-bottom">
       <button class="nav-item nav-button" id="navSettings"><span class="nav-icon">⚙</span><span class="nav-text">Settings</span></button>
     </div>
   </aside>
 
   <main class="wrap">
+    <section class="main-menu-page" id="mainMenuPage">
+      <div class="main-menu-grid">
+        <button class="main-menu-btn" id="mmLibrary"><span class="main-menu-icon">＋</span>Add / remove games</button>
+        <button class="main-menu-btn" id="mmLocal"><span class="main-menu-icon">📁</span>Local Games</button>
+        <button class="main-menu-btn" id="mmCategories"><span class="main-menu-icon">▦</span>Categories</button>
+        <button class="main-menu-btn" id="mmRecommendations"><span class="main-menu-icon">✦</span>Recommendations</button>
+        <button class="main-menu-btn" id="mmThemes"><span class="main-menu-icon">🎨</span>Themes</button>
+        <button class="main-menu-btn" id="mmSettings"><span class="main-menu-icon">⚙</span>Settings</button>
+      </div>
+    </section>
+
     <section id="libraryPage">
       <header>
         <h1>Game <span>Vault</span></h1>
@@ -3495,7 +3520,7 @@ const searchInput=$('searchInput'), resultsBox=$('results'), grid=$('gamesGrid')
 const totalValue=$('totalValue'), countLabel=$('countLabel'), emptyState=$('emptyState');
 const categoriesPage=$('categoriesPage'), categoryBoxes=$('categoryBoxes'), categoryDetail=$('categoryDetail');
 const recommendationsPage=$('recommendationsPage'), recommendationsGrid=$('recommendationsGrid'), recBasedOn=$('recBasedOn'), recEmptyState=$('recEmptyState');
-const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommendations=$('navRecommendations'), navLocal=$('navLocal'), navThemes=$('navThemes'), navSettings=$('navSettings'), editPage=$('editPage'), libraryPage=$('libraryPage');
+const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommendations=$('navRecommendations'), navLocal=$('navLocal'), navThemes=$('navThemes'), navSettings=$('navSettings'), navMainMenu=$('navMainMenu'), editPage=$('editPage'), libraryPage=$('libraryPage'), mainMenuPage=$('mainMenuPage');
 const themesPage=$('themesPage'), themeGrid=$('themeGrid');
 const settingsPage=$('settingsPage');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
@@ -3968,6 +3993,7 @@ function showLibrary(){
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
   settingsPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3977,6 +4003,7 @@ function showLibrary(){
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
   navSettings.classList.remove('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -3987,6 +4014,7 @@ function showLocal(){
   recommendationsPage.classList.remove('active');
   themesPage.classList.remove('active');
   settingsPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3997,6 +4025,7 @@ function showLocal(){
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
   navSettings.classList.remove('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   renderLocalGamesGrid();
   window.scrollTo({top:0,behavior:'smooth'});
@@ -4009,6 +4038,7 @@ function showCategories(){
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
   settingsPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -4019,6 +4049,7 @@ function showCategories(){
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
   navSettings.classList.remove('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -4032,6 +4063,7 @@ function showRecommendations(){
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
   settingsPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -4042,6 +4074,7 @@ function showRecommendations(){
   navRecommendations.classList.add('active');
   navThemes.classList.remove('active');
   navSettings.classList.remove('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
   loadRecommendations();
@@ -4053,6 +4086,7 @@ function showThemes(){
   localPage.classList.remove('active');
   recommendationsPage.classList.remove('active');
   settingsPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -4063,6 +4097,7 @@ function showThemes(){
   navRecommendations.classList.remove('active');
   navThemes.classList.add('active');
   navSettings.classList.remove('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -4073,6 +4108,7 @@ function showSettings(){
   localPage.classList.remove('active');
   recommendationsPage.classList.remove('active');
   themesPage.classList.remove('active');
+  mainMenuPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -4083,9 +4119,32 @@ function showSettings(){
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
   navSettings.classList.add('active');
+  navMainMenu.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
   refreshUpdateInfo(false);
+}
+
+function showMainMenu(){
+  libraryPage.style.display='none';
+  categoriesPage.classList.remove('active');
+  localPage.classList.remove('active');
+  recommendationsPage.classList.remove('active');
+  themesPage.classList.remove('active');
+  settingsPage.classList.remove('active');
+  editPage.classList.remove('active');
+  editorEmpty.style.display='block';
+  editForm.classList.remove('visible');
+  mainMenuPage.classList.add('active');
+  navLibrary.classList.remove('active');
+  navLocal.classList.remove('active');
+  navCategories.classList.remove('active');
+  navRecommendations.classList.remove('active');
+  navThemes.classList.remove('active');
+  navSettings.classList.remove('active');
+  navMainMenu.classList.add('active');
+  closeCategory();
+  window.scrollTo({top:0,behavior:'smooth'});
 }
 
 // ---------- Themes ----------
@@ -4841,6 +4900,13 @@ $('navLibrary').onclick=showLibrary;
 $('navLocal').onclick=showLocal;
 $('navCategories').onclick=showCategories;
 $('navRecommendations').onclick=showRecommendations;
+navMainMenu.onclick=showMainMenu;
+$('mmLibrary').onclick=showLibrary;
+$('mmLocal').onclick=showLocal;
+$('mmCategories').onclick=showCategories;
+$('mmRecommendations').onclick=showRecommendations;
+$('mmThemes').onclick=showThemes;
+$('mmSettings').onclick=showSettings;
 
 let localFolders=[];
 
