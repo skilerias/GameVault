@@ -2880,6 +2880,7 @@ PAGE = """
       <button class="nav-item nav-button" id="navCategories"><span class="nav-icon">▦</span><span class="nav-text">Categories</span></button>
       <button class="nav-item nav-button" id="navRecommendations"><span class="nav-icon">✦</span><span class="nav-text">Recommendations</span></button>
       <button class="nav-item nav-button" id="navThemes"><span class="nav-icon">🎨</span><span class="nav-text">Themes</span></button>
+      <button class="nav-item nav-button" id="navSettings"><span class="nav-icon">⚙</span><span class="nav-text">Settings</span></button>
     </div>
   </aside>
 
@@ -3039,6 +3040,15 @@ PAGE = """
         </div>
         <div class="appearance-status" id="iconStatus"></div>
       </div>
+    </section>
+
+    <section class="categories-page" id="settingsPage">
+      <div class="edit-top">
+        <div>
+          <h1>Settings</h1>
+          <div class="section-note">App-level options.</div>
+        </div>
+      </div>
 
       <div class="appearance-block">
         <h2 class="appearance-block-title">App updates</h2>
@@ -3151,8 +3161,9 @@ const searchInput=$('searchInput'), resultsBox=$('results'), grid=$('gamesGrid')
 const totalValue=$('totalValue'), countLabel=$('countLabel'), emptyState=$('emptyState');
 const categoriesPage=$('categoriesPage'), categoryBoxes=$('categoryBoxes'), categoryDetail=$('categoryDetail');
 const recommendationsPage=$('recommendationsPage'), recommendationsGrid=$('recommendationsGrid'), recBasedOn=$('recBasedOn'), recEmptyState=$('recEmptyState');
-const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommendations=$('navRecommendations'), navLocal=$('navLocal'), navThemes=$('navThemes'), editPage=$('editPage'), libraryPage=$('libraryPage');
+const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommendations=$('navRecommendations'), navLocal=$('navLocal'), navThemes=$('navThemes'), navSettings=$('navSettings'), editPage=$('editPage'), libraryPage=$('libraryPage');
 const themesPage=$('themesPage'), themeGrid=$('themeGrid');
+const settingsPage=$('settingsPage');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
 const iconPreview=$('iconPreview'), iconChooseBtn=$('iconChooseBtn'), iconFileInput=$('iconFileInput'), iconResetBtn=$('iconResetBtn'), iconStatus=$('iconStatus');
 const updateCurrentVersion=$('updateCurrentVersion'), checkUpdateBtn=$('checkUpdateBtn'), installUpdateBtn=$('installUpdateBtn'), updateStatus=$('updateStatus'), updateNotes=$('updateNotes');
@@ -3616,6 +3627,7 @@ function showLibrary(){
   recommendationsPage.classList.remove('active');
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
+  settingsPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3624,6 +3636,7 @@ function showLibrary(){
   navCategories.classList.remove('active');
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
+  navSettings.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -3633,6 +3646,7 @@ function showLocal(){
   categoriesPage.classList.remove('active');
   recommendationsPage.classList.remove('active');
   themesPage.classList.remove('active');
+  settingsPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3642,6 +3656,7 @@ function showLocal(){
   navCategories.classList.remove('active');
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
+  navSettings.classList.remove('active');
   closeCategory();
   renderLocalGamesGrid();
   window.scrollTo({top:0,behavior:'smooth'});
@@ -3653,6 +3668,7 @@ function showCategories(){
   recommendationsPage.classList.remove('active');
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
+  settingsPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3662,6 +3678,7 @@ function showCategories(){
   navCategories.classList.add('active');
   navRecommendations.classList.remove('active');
   navThemes.classList.remove('active');
+  navSettings.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -3674,6 +3691,7 @@ function showRecommendations(){
   categoriesPage.classList.remove('active');
   localPage.classList.remove('active');
   themesPage.classList.remove('active');
+  settingsPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3683,6 +3701,7 @@ function showRecommendations(){
   navCategories.classList.remove('active');
   navRecommendations.classList.add('active');
   navThemes.classList.remove('active');
+  navSettings.classList.remove('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
   loadRecommendations();
@@ -3693,6 +3712,7 @@ function showThemes(){
   categoriesPage.classList.remove('active');
   localPage.classList.remove('active');
   recommendationsPage.classList.remove('active');
+  settingsPage.classList.remove('active');
   editPage.classList.remove('active');
   editorEmpty.style.display='block';
   editForm.classList.remove('visible');
@@ -3702,6 +3722,27 @@ function showThemes(){
   navCategories.classList.remove('active');
   navRecommendations.classList.remove('active');
   navThemes.classList.add('active');
+  navSettings.classList.remove('active');
+  closeCategory();
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+
+function showSettings(){
+  libraryPage.style.display='none';
+  categoriesPage.classList.remove('active');
+  localPage.classList.remove('active');
+  recommendationsPage.classList.remove('active');
+  themesPage.classList.remove('active');
+  editPage.classList.remove('active');
+  editorEmpty.style.display='block';
+  editForm.classList.remove('visible');
+  settingsPage.classList.add('active');
+  navLibrary.classList.remove('active');
+  navLocal.classList.remove('active');
+  navCategories.classList.remove('active');
+  navRecommendations.classList.remove('active');
+  navThemes.classList.remove('active');
+  navSettings.classList.add('active');
   closeCategory();
   window.scrollTo({top:0,behavior:'smooth'});
   refreshUpdateInfo(false);
@@ -4511,6 +4552,7 @@ localAddBtn.onclick=async()=>{
 $('backCategories').onclick=closeCategory;
 $('recRefreshBtn').onclick=()=>loadRecommendations(true);
 navThemes.onclick=showThemes;
+navSettings.onclick=showSettings;
 
 $('navToggle').onclick=()=>{
   const hidden=$('appShell').classList.toggle('nav-hidden');
