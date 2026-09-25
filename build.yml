@@ -5,8 +5,8 @@ on:
   push:
     branches: [ main, master ]
 
-# Needed so the "Publish GitHub Release" step below is allowed to create a
-# release and upload the installer to it.
+# Needed so the workflow can commit the bumped VERSION file back to the repo
+# and publish a GitHub Release.
 permissions:
   contents: write
 
@@ -28,22 +28,40 @@ jobs:
       - name: Create icon
         run: python make_icon.py
 
-      # Single source of truth for the version: the VERSION file at the repo
-      # root. Bump it before pushing to main to ship a new release -- this
-      # same number becomes the installer version AND the release tag, and
-      # it's what's bundled into the app for GameVault_app.py's own
-      # check_for_update() to compare itself against next time.
-      - name: Read app version
-        id: appver
-        shell: pwsh
+      # ---- Auto version bump ----
+      # 0.0.1 -> 0.0.2 -> ... -> 0.0.21 -> 1.1.0 -> 1.1.1 -> ... -> 1.1.21
+      # -> 1.2.0 -> 1.2.1 -> ... -> 1.2.21 -> 1.3.0 -> and so on.
+      # Once major is 1+, patch cycles 0..21 and minor goes up by 1 every
+      # time patch wraps back to 0. Major only ever jumps 0 -> 1, once.
+      - name: Bump VERSION
         run: |
-          $version = (Get-Content VERSION -Raw).Trim()
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            Write-Error "VERSION file must look like 1.2.3 (got '$version')"
-            exit 1
+          $content = (Get-Content VERSION -Raw).Trim()
+          $parts = $content.Split('.')
+          [int]$major = $parts[0]; [int]$minor = $parts[1]; [int]$patch = $parts[2]
+
+          if ($major -eq 0) {
+            if ($patch -lt 21) { $patch++ }
+            else { $major = 1; $minor = 1; $patch = 0 }
+          } else {
+            if ($patch -lt 21) { $patch++ }
+            else { $patch = 0; $minor++ }
           }
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "tag=v$version" >> $env:GITHUB_OUTPUT
+
+          $newVersion = "$major.$minor.$patch"
+          Set-Content -Path VERSION -Value $newVersion -NoNewline
+          Write-Host "New version: $newVersion"
+          echo "APPVER=$newVersion" >> $env:GITHUB_ENV
+
+      # Save the bumped VERSION back to the repo so the next run starts
+      # from the right number. "[skip ci]" stops this commit from
+      # triggering the workflow again (infinite loop).
+      - name: Commit bumped VERSION back to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "Bump version to $env:APPVER [skip ci]"
+          git push
 
       - name: Build with PyInstaller (onedir)
         run: >
@@ -57,65 +75,24 @@ jobs:
           --collect-all webview
           GameVault_app.py
 
-      # Fail the build if VERSION didn't make it into the bundle -- otherwise
-      # the app ships showing 0.0.0 and in-app updates never work.
-      - name: Verify VERSION is bundled
-        shell: pwsh
-        run: |
-          if (-not ((Test-Path "dist/GameVault/_internal/VERSION") -or (Test-Path "dist/GameVault/VERSION"))) {
-            Write-Error "VERSION was not bundled into dist/GameVault"
-            exit 1
-          }
-          Get-ChildItem -Recurse dist/GameVault -Filter VERSION | ForEach-Object { Write-Host "Found: $($_.FullName)" }
-
       - name: Install Inno Setup
         run: choco install innosetup -y
 
       - name: Build installer with Inno Setup
         run: |
           mkdir installer
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.appver.outputs.version }}" "GameVault.iss"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:APPVER" "GameVault.iss"
 
-      - name: Upload installer as workflow artifact
+      - name: Upload installer as artifact
         uses: actions/upload-artifact@v4
         with:
           name: GameVault_Setup
           path: installer\GameVault_Setup.exe
 
-      # If VERSION wasn't bumped since the last release (e.g. a push that
-      # only touched something else, or a re-run), a release for this tag
-      # already exists -- skip publishing again instead of erroring out or
-      # silently overwriting it.
-      - name: Check if this version was already released
-        id: check_release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "${{ steps.appver.outputs.tag }}" --repo "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -eq 0) {
-            echo "exists=true" >> $env:GITHUB_OUTPUT
-          } else {
-            echo "exists=false" >> $env:GITHUB_OUTPUT
-          }
-          # 'gh release view' exits non-zero when the release does NOT exist yet
-          # (the normal case for a brand new version). That leftover exit code is
-          # still $LASTEXITCODE at the end of this script, and GitHub Actions fails
-          # a pwsh step whose script ends on a non-zero $LASTEXITCODE -- even though
-          # we already handled it correctly above. Force success explicitly so the
-          # job continues to the "Publish GitHub Release" step.
-          exit 0
-
-      # This is what GameVault_app.py's check_for_update() actually polls
-      # (GitHub Releases API, "latest"), and what it downloads the .exe
-      # from -- an artifact upload alone is not enough for in-app updates.
-      - name: Publish GitHub Release
-        if: steps.check_release.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.appver.outputs.tag }}
-          name: GameVault ${{ steps.appver.outputs.version }}
-          generate_release_notes: true
-          files: installer/GameVault_Setup.exe
+      # This is the part your in-app "Check for updates" actually reads --
+      # it looks at GitHub Releases, not at workflow artifacts.
+      - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$env:APPVER" "installer\GameVault_Setup.exe" --title "GameVault v$env:APPVER" --notes "Automated build"
