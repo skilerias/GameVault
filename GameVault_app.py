@@ -1884,6 +1884,165 @@ def api_scan_local_folders():
     return jsonify({"games": games, "added": total_added, "removed": total_removed})
 
 
+def _scan_installed_steam_apps():
+    """Every Steam game actually installed on this machine right now, found
+    by reading each library folder's appmanifest_<appid>.acf files -- the
+    same manifests the real Steam client writes and keeps up to date.
+    Returns {appid: {"name": ..., "installdir": ...}}, or {} if Steam isn't
+    installed / no libraries can be found. Best-effort, like the rest of
+    the Steam on-disk reading in this file."""
+    steam_root = _find_steam_root()
+    if not steam_root:
+        return {}
+    found = {}
+    for lib in _library_folders(steam_root):
+        steamapps_dir = os.path.join(lib, "steamapps")
+        try:
+            entries = os.listdir(steamapps_dir)
+        except OSError:
+            continue
+        for fname in entries:
+            if not (fname.startswith("appmanifest_") and fname.endswith(".acf")):
+                continue
+            try:
+                with open(os.path.join(steamapps_dir, fname), "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+            except OSError:
+                continue
+            m_id = re.search(r'"appid"\s*"(\d+)"', text)
+            if not m_id:
+                continue
+            m_name = re.search(r'"name"\s*"([^"]+)"', text)
+            m_dir = re.search(r'"installdir"\s*"([^"]+)"', text)
+            appid = int(m_id.group(1))
+            found[appid] = {
+                "name": m_name.group(1) if m_name else None,
+                "installdir": os.path.join(steamapps_dir, "common", m_dir.group(1)) if m_dir else None,
+            }
+    return found
+
+
+@app.route("/api/detect_steam_games", methods=["POST"])
+def api_detect_steam_games():
+    """Scan the local Steam client's own library folders for installed
+    games and bring the library in line with what's actually on disk:
+    any installed game not already tracked gets added (pulling its real
+    name/artwork/price from Steam's store, same as adding by hand), and
+    every existing Steam entry's `installed` flag is updated to match.
+    Steam entries are never removed here even if uninstalled -- GameVault
+    also tracks games you own but don't currently have installed."""
+    installed = _scan_installed_steam_apps()
+    games = load_library()
+    existing_appids = {g["appid"] for g in games if g.get("source") != "local"}
+
+    added = []
+    for i, appid in enumerate(sorted(installed)):
+        if appid in existing_appids:
+            continue
+        if added:
+            time.sleep(0.6)  # be gentle with Steam's store API across several new games
+        info = installed[appid]
+        details = steam_details(appid, include_tags=True)
+        if not details:
+            # Not a real store listing (delisted, a tool/runtime with its own
+            # manifest, etc.) -- still track it, using the manifest's own name.
+            details = {
+                "appid": appid, "name": info.get("name") or f"App {appid}", "image": "",
+                "price": None, "currency": None, "discount": 0, "description": "",
+                "steam_categories": [], "steam_genres": [], "steam_tags": [],
+                "developers": [], "publishers": [], "category": "",
+            }
+        details.update({
+            "rating": None, "played": False, "notes": "", "pros": "", "cons": "",
+            "favorite": False, "custom_categories": [], "playtime_seconds": 0,
+            "dlcs": [], "bundle_plan": None,
+            "installed": True, "install_dir": info.get("installdir"),
+        })
+        games.append(details)
+        added.append(appid)
+
+    for g in games:
+        if g.get("source") == "local":
+            continue
+        info = installed.get(g["appid"])
+        g["installed"] = info is not None
+        g["install_dir"] = info.get("installdir") if info else None
+
+    save_library(games)
+    return jsonify({"games": games, "added": added})
+
+
+def _find_local_uninstaller(exe_path):
+    """Best-effort: an uninstaller sitting next to a local game's .exe --
+    the common patterns installers leave behind (Inno Setup's unins000.exe,
+    a generic uninstall.exe/uninst.exe). Only ever looks; never invents or
+    deletes anything itself."""
+    game_dir = os.path.dirname(exe_path)
+    patterns = ("unins000.exe", "unins001.exe", "uninstall.exe", "uninst.exe", "uninstaller.exe")
+    for d in (game_dir, os.path.dirname(game_dir)):
+        if not d or not os.path.isdir(d):
+            continue
+        try:
+            names = {n.lower(): n for n in os.listdir(d)}
+        except OSError:
+            continue
+        for pat in patterns:
+            if pat in names:
+                return os.path.join(d, names[pat])
+    return None
+
+
+@app.route("/api/uninstall", methods=["POST"])
+def api_uninstall():
+    """Uninstall a game. Steam games are handed off to Steam's own
+    steam://uninstall/<appid> flow -- Steam shows its normal confirmation
+    dialog and does the actual removal; GameVault never deletes Steam game
+    files itself. Local games are uninstalled via whatever uninstaller can
+    be found next to their .exe; if none exists, nothing is deleted and the
+    folder path is reported back so the user can remove it by hand."""
+    appid = (request.json or {}).get("appid")
+    if appid is None:
+        return jsonify({"error": "missing_appid"}), 400
+    appid = int(appid)
+
+    game = next((g for g in load_library() if g["appid"] == appid), None)
+    if not game:
+        return jsonify({"error": "not_found"}), 404
+
+    if game.get("source") == "local":
+        exe_path = game.get("exe_path")
+        if not exe_path or not os.path.isfile(exe_path):
+            return jsonify({"error": "exe_not_found",
+                             "detail": "The saved .exe path no longer exists."}), 404
+        uninstaller = _find_local_uninstaller(exe_path)
+        if not uninstaller:
+            return jsonify({"error": "no_uninstaller",
+                             "detail": "No uninstaller was found next to this game's .exe.",
+                             "game_dir": os.path.dirname(exe_path)}), 404
+        try:
+            import subprocess
+            subprocess.Popen([uninstaller], cwd=os.path.dirname(uninstaller))
+            return jsonify({"ok": True})
+        except OSError as e:
+            return jsonify({"error": "launch_failed", "detail": str(e)}), 500
+
+    if not game.get("installed"):
+        return jsonify({"error": "not_installed",
+                         "detail": "This game isn't currently installed."}), 400
+
+    url = f"steam://uninstall/{appid}"
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(url)  # noqa: S606 — intentional steam:// handoff
+        elif sys.platform == "darwin":
+            os.system(f'open "{url}"')
+        else:
+            os.system(f'xdg-open "{url}"')
+        return jsonify({"ok": True})
+    except OSError as e:
+        return jsonify({"error": "launch_failed", "detail": str(e)}), 500
+
+
 @app.route("/api/launch", methods=["POST"])
 def api_launch():
     """Launch a game. Local games (Epic/Rockstar/GOG/anything added via
@@ -2935,6 +3094,7 @@ PAGE = """
           <div class="total-value" id="totalValue">$0.00</div>
         </div>
         <button class="refresh-btn" id="refreshBtn">Refresh Prices &amp; Steam Data</button>
+        <button class="refresh-btn" id="detectSteamBtn" type="button" title="Scan your Steam library folders for installed games">Detect Installed Steam Games</button>
       </div>
 
       <div class="search-box">
@@ -3168,7 +3328,10 @@ PAGE = """
           </div>
 
           <div class="edit-actions">
-            <button class="btn-danger" id="editDelete">Remove from library</button>
+            <div>
+              <button class="btn-danger" id="editDelete">Remove from library</button>
+              <button class="btn-danger" id="editUninstall" style="display:none;margin-left:8px">Uninstall</button>
+            </div>
             <div>
               <button class="btn-cancel" id="editCancel">Cancel</button>
               <button class="btn-save" id="editSave">Save changes</button>
@@ -3519,6 +3682,8 @@ function selectEditGame(g){
   editNotes.value=g.notes||'';
   renderEditCategoryChecks(g);
   renderLocalAttachBox(g);
+  const editUninstallBtn=$('editUninstall');
+  if(editUninstallBtn)editUninstallBtn.style.display=(g.source==='local'||g.installed)?'inline-block':'none';
   editorEmpty.style.display='none';
   editForm.classList.add('visible');
   updateRatingPreview();
@@ -4178,6 +4343,49 @@ async function removeGame(appid){
   if(editingAppid===appid)closeEditPage();
 }
 
+async function uninstallGame(appid,name,isLocal){
+  const msg=isLocal?`Run ${name}'s uninstaller?`:`Uninstall ${name} through Steam?`;
+  if(!confirm(msg))return;
+  const btn=$('editUninstall');
+  const old=btn.textContent;
+  btn.disabled=true;btn.textContent='Uninstalling…';
+  try{
+    const res=await fetch('/api/uninstall',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({appid})});
+    const data=await res.json();
+    if(!res.ok){
+      const msgs={
+        no_uninstaller:`No uninstaller was found next to ${name}'s .exe.`+(data.game_dir?` You'll need to delete its folder yourself: ${data.game_dir}`:' You\'ll need to delete its files yourself.'),
+        not_installed:`${name} isn't currently installed — try "Detect Installed Steam Games" first.`,
+        exe_not_found:`${name}'s saved .exe path no longer exists.`,
+        not_found:`${name} couldn't be found in your library.`,
+      };
+      alert(msgs[data.error]||('Could not uninstall '+name+': '+(data.detail||data.error||'unknown error')));
+    }else{
+      alert(isLocal?`${name}'s uninstaller has been launched.`:`Steam's uninstall dialog for ${name} has been opened.`);
+    }
+  }catch(e){
+    alert('Could not reach GameVault to uninstall '+name+'.');
+  }finally{
+    btn.disabled=false;btn.textContent=old;
+  }
+}
+
+async function detectSteamGames(silent){
+  const btn=$('detectSteamBtn');
+  let old;
+  if(!silent&&btn){old=btn.textContent;btn.disabled=true;btn.textContent='Scanning Steam library...';}
+  try{
+    const res=await fetch('/api/detect_steam_games',{method:'POST'});
+    const data=await res.json();
+    if(Array.isArray(data.games))setGames(data.games);
+    if(!silent&&data.added)alert(data.added.length?`Found ${data.added.length} newly installed Steam game(s).`:'No new installed Steam games found.');
+  }catch(e){
+    if(!silent)alert('Could not scan your Steam library.');
+  }finally{
+    if(!silent&&btn){btn.disabled=false;btn.textContent=old;}
+  }
+}
+
 async function addGame(appid){
   resultsBox.style.display='none';
   searchInput.value='';
@@ -4438,6 +4646,13 @@ $('editDelete').onclick=async()=>{
   if(!confirm('Remove '+name+' from your library?'))return;
   await removeGame(editingAppid);
 };
+$('editUninstall').onclick=()=>{
+  if(editingAppid===null)return;
+  const g=allGames.find(x=>x.appid===editingAppid);
+  if(!g)return;
+  uninstallGame(g.appid,g.name,g.source==='local');
+};
+$('detectSteamBtn').onclick=()=>detectSteamGames(false);
 
 async function loadCustomCategories(){
   const res=await fetch('/api/categories');
@@ -4644,6 +4859,7 @@ initTheme();
 loadCurrentIconPreview();
 loadGames().then(loadCustomCategories).then(syncRunningStatus);
 loadLocalFolders();
+detectSteamGames(true);  // quiet scan on startup so newly installed Steam games show up automatically
 // Re-pull games periodically so playtime numbers keep ticking up while a
 // game runs, without a manual refresh. Skipped while editing a game so it
 // doesn't disturb an in-progress edit.
