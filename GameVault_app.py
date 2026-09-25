@@ -4354,7 +4354,7 @@ async function uninstallGame(appid,name,isLocal){
     const data=await res.json();
     if(!res.ok){
       const msgs={
-        no_uninstaller:`No uninstaller was found next to ${name}'s .exe.`+(data.game_dir?` You'll need to delete its folder yourself: ${data.game_dir}`:' You\'ll need to delete its files yourself.'),
+        no_uninstaller:`No uninstaller was found next to ${name}'s .exe.`+(data.game_dir?` You will need to delete its folder yourself: ${data.game_dir}`:' You will need to delete its files yourself.'),
         not_installed:`${name} isn't currently installed — try "Detect Installed Steam Games" first.`,
         exe_not_found:`${name}'s saved .exe path no longer exists.`,
         not_found:`${name} couldn't be found in your library.`,
