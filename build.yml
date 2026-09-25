@@ -6,8 +6,7 @@ on:
     branches: [ main, master ]
 
 # Needed so the "Publish GitHub Release" step below is allowed to create a
-# release and upload the installer to it, and so the version-bump step can
-# push the updated VERSION file back to the repo.
+# release and upload the installer to it.
 permissions:
   contents: write
 
@@ -29,47 +28,22 @@ jobs:
       - name: Create icon
         run: python make_icon.py
 
-      # ---- Auto version bump ----
-      # 0.0.1 -> 0.0.2 -> ... -> 0.0.21 -> 1.1.0 -> 1.1.1 -> ... -> 1.1.21
-      # -> 1.2.0 -> 1.2.1 -> ... -> 1.2.21 -> 1.3.0 -> and so on.
-      # Once major is 1+, patch cycles 0..21 and minor goes up by 1 every
-      # time patch wraps back to 0. Major only ever jumps 0 -> 1, once.
-      # This is the single source of truth: the VERSION file at the repo
-      # root gets bumped here every run, then becomes the installer version
-      # AND the release tag, and it's what's bundled into the app for
-      # GameVault_app.py's own check_for_update() to compare against.
-      - name: Bump VERSION
+      # Single source of truth for the version: the VERSION file at the repo
+      # root. Bump it before pushing to main to ship a new release -- this
+      # same number becomes the installer version AND the release tag, and
+      # it's what's bundled into the app for GameVault_app.py's own
+      # check_for_update() to compare itself against next time.
+      - name: Read app version
         id: appver
         shell: pwsh
         run: |
-          $content = (Get-Content VERSION -Raw).Trim()
-          $parts = $content.Split('.')
-          [int]$major = $parts[0]; [int]$minor = $parts[1]; [int]$patch = $parts[2]
-
-          if ($major -eq 0) {
-            if ($patch -lt 21) { $patch++ }
-            else { $major = 1; $minor = 1; $patch = 0 }
-          } else {
-            if ($patch -lt 21) { $patch++ }
-            else { $patch = 0; $minor++ }
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "VERSION file must look like 1.2.3 (got '$version')"
+            exit 1
           }
-
-          $newVersion = "$major.$minor.$patch"
-          Set-Content -Path VERSION -Value $newVersion -NoNewline
-          Write-Host "New version: $newVersion"
-          echo "version=$newVersion" >> $env:GITHUB_OUTPUT
-          echo "tag=v$newVersion" >> $env:GITHUB_OUTPUT
-
-      # Save the bumped VERSION back to the repo so the next run starts from
-      # the right number. "[skip ci]" stops this commit from triggering the
-      # workflow again (infinite loop).
-      - name: Commit bumped VERSION back to repo
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add VERSION
-          git commit -m "Bump version to ${{ steps.appver.outputs.version }} [skip ci]"
-          git push origin HEAD:${{ github.ref_name }}
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "tag=v$version" >> $env:GITHUB_OUTPUT
 
       - name: Build with PyInstaller (onedir)
         run: >
@@ -108,9 +82,9 @@ jobs:
           name: GameVault_Setup
           path: installer\GameVault_Setup.exe
 
-      # Safety net: with the auto-bump above this should always be a fresh
-      # version, but if a release for this tag somehow already exists (e.g.
-      # a manual re-run), skip publishing again instead of erroring out or
+      # If VERSION wasn't bumped since the last release (e.g. a push that
+      # only touched something else, or a re-run), a release for this tag
+      # already exists -- skip publishing again instead of erroring out or
       # silently overwriting it.
       - name: Check if this version was already released
         id: check_release
@@ -124,6 +98,12 @@ jobs:
           } else {
             echo "exists=false" >> $env:GITHUB_OUTPUT
           }
+          # 'gh release view' exits non-zero when the release does NOT exist yet
+          # (the normal case for a brand new version). That leftover exit code is
+          # still $LASTEXITCODE at the end of this script, and GitHub Actions fails
+          # a pwsh step whose script ends on a non-zero $LASTEXITCODE -- even though
+          # we already handled it correctly above. Force success explicitly so the
+          # job continues to the "Publish GitHub Release" step.
           exit 0
 
       # This is what GameVault_app.py's check_for_update() actually polls

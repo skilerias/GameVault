@@ -1992,14 +1992,144 @@ def _find_local_uninstaller(exe_path):
     return None
 
 
+# ---------- manual cleanup for local games with no real uninstaller ----------
+#
+# When a local game ships no unins000.exe/uninstall.exe of its own, GameVault
+# removes it by hand instead of just complaining: delete everything sitting
+# next to the .exe (its whole install folder), then also look for and remove
+# any leftover per-game folders it left in AppData/ProgramData/Program Files.
+# This never touches anything outside those specific folders, and never wipes
+# a folder that looks shared/shallow rather than owned by a single game.
+
+_PROTECTED_LEAF_NAMES = {
+    "windows", "system32", "program files", "program files (x86)", "programdata",
+    "users", "desktop", "downloads", "documents", "appdata", "roaming", "local",
+    "locallow", "steam", "steamapps", "common", "games", "public", "onedrive",
+}
+
+
+def _is_safe_to_wipe(path):
+    """Refuse to recursively delete anything that isn't clearly a single
+    game's own folder -- a drive root, the user's home folder, or any of the
+    big shared Windows/Steam folders, however deep the exe happened to sit."""
+    if not path:
+        return False
+    norm = os.path.normpath(os.path.abspath(path))
+    if not os.path.isdir(norm):
+        return False
+    drive, tail = os.path.splitdrive(norm)
+    parts = [p for p in tail.split(os.sep) if p]
+    if len(parts) < 2:
+        return False  # e.g. C:\Games -- too shallow to be one game's folder
+    try:
+        home = os.path.normpath(os.path.expanduser("~"))
+    except Exception:
+        home = None
+    if home and os.path.normcase(norm) == os.path.normcase(home):
+        return False
+    if parts[-1].lower() in _PROTECTED_LEAF_NAMES:
+        return False
+    return True
+
+
+def _candidate_leftover_roots():
+    """Places installers commonly stash per-game data outside the install
+    folder itself."""
+    roots = []
+    appdata = os.environ.get("APPDATA")
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if appdata:
+        roots.append(appdata)
+    if local_appdata:
+        roots.append(local_appdata)
+        roots.append(os.path.join(os.path.dirname(local_appdata), "LocalLow"))
+    programdata = os.environ.get("PROGRAMDATA")
+    if programdata:
+        roots.append(programdata)
+    for env in ("PROGRAMFILES", "PROGRAMFILES(X86)"):
+        p = os.environ.get(env)
+        if p:
+            roots.append(p)
+    return [r for r in roots if r and os.path.isdir(r)]
+
+
+def _game_name_tokens(game, exe_path):
+    """Normalized (alnum-only, lowercase) names worth matching leftover
+    folders against: the library name, the .exe's own filename, and the
+    folder the .exe lives in."""
+    raw = {game.get("name"), os.path.splitext(os.path.basename(exe_path))[0],
+           os.path.basename(os.path.dirname(exe_path))}
+    tokens = {_normalize_for_compare(n) for n in raw if n}
+    return {t for t in tokens if len(t) >= 3}
+
+
+def _find_leftover_dirs(game, exe_path):
+    """Best-effort scan of AppData/ProgramData/Program Files for folders
+    that look like they belong to this game, by name only -- one level
+    deep, never recursing into every subfolder on the system."""
+    tokens = _game_name_tokens(game, exe_path)
+    if not tokens:
+        return []
+    found = []
+    for root in _candidate_leftover_roots():
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            continue
+        for entry in entries:
+            full = os.path.join(root, entry)
+            if not os.path.isdir(full):
+                continue
+            norm_entry = _normalize_for_compare(entry)
+            if not norm_entry:
+                continue
+            if any(tok in norm_entry or norm_entry in tok for tok in tokens):
+                found.append(full)
+    return found
+
+
+def _manual_local_cleanup(game, exe_path):
+    """Delete everything next to a local game's .exe (its whole install
+    folder), plus any leftover per-game folders found in AppData/ProgramData/
+    Program Files. Returns the list of paths actually removed. Used only
+    when the game ships no uninstaller of its own."""
+    removed = []
+    game_dir = os.path.dirname(exe_path)
+    if _is_safe_to_wipe(game_dir):
+        try:
+            shutil.rmtree(game_dir, ignore_errors=True)
+            removed.append(game_dir)
+        except OSError:
+            pass
+    else:
+        # Folder looked shared/shallow -- just take the .exe itself rather
+        # than risk wiping something that isn't this game's alone.
+        try:
+            os.remove(exe_path)
+            removed.append(exe_path)
+        except OSError:
+            pass
+
+    for leftover in _find_leftover_dirs(game, exe_path):
+        if not _is_safe_to_wipe(leftover):
+            continue
+        try:
+            shutil.rmtree(leftover, ignore_errors=True)
+            removed.append(leftover)
+        except OSError:
+            pass
+    return removed
+
+
 @app.route("/api/uninstall", methods=["POST"])
 def api_uninstall():
     """Uninstall a game. Steam games are handed off to Steam's own
     steam://uninstall/<appid> flow -- Steam shows its normal confirmation
     dialog and does the actual removal; GameVault never deletes Steam game
     files itself. Local games are uninstalled via whatever uninstaller can
-    be found next to their .exe; if none exists, nothing is deleted and the
-    folder path is reported back so the user can remove it by hand."""
+    be found next to their .exe; if none exists, GameVault removes it by
+    hand instead -- the whole install folder next to the .exe, plus any
+    leftover per-game folders it can find in AppData/Program Files."""
     appid = (request.json or {}).get("appid")
     if appid is None:
         return jsonify({"error": "missing_appid"}), 400
@@ -2015,16 +2145,15 @@ def api_uninstall():
             return jsonify({"error": "exe_not_found",
                              "detail": "The saved .exe path no longer exists."}), 404
         uninstaller = _find_local_uninstaller(exe_path)
-        if not uninstaller:
-            return jsonify({"error": "no_uninstaller",
-                             "detail": "No uninstaller was found next to this game's .exe.",
-                             "game_dir": os.path.dirname(exe_path)}), 404
-        try:
-            import subprocess
-            subprocess.Popen([uninstaller], cwd=os.path.dirname(uninstaller))
-            return jsonify({"ok": True})
-        except OSError as e:
-            return jsonify({"error": "launch_failed", "detail": str(e)}), 500
+        if uninstaller:
+            try:
+                import subprocess
+                subprocess.Popen([uninstaller], cwd=os.path.dirname(uninstaller))
+                return jsonify({"ok": True, "method": "uninstaller"})
+            except OSError as e:
+                return jsonify({"error": "launch_failed", "detail": str(e)}), 500
+        removed = _manual_local_cleanup(game, exe_path)
+        return jsonify({"ok": True, "method": "manual", "removed_paths": removed})
 
     if not game.get("installed"):
         return jsonify({"error": "not_installed",
@@ -2887,6 +3016,8 @@ PAGE = """
   .sort-wrap label{font-size:.78rem;color:var(--ink-dim)}
   .sort-select{background:var(--bg-elev);border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:8px 10px;font:inherit;font-size:.82rem;cursor:pointer}
   .sort-select:focus{outline:none;border-color:var(--teal)}
+  .installed-toggle{display:flex;align-items:center;gap:7px;font-size:.82rem;color:var(--ink-dim);cursor:pointer;white-space:nowrap;user-select:none}
+  .installed-toggle input{width:auto;cursor:pointer;accent-color:var(--teal)}
   .categories-page{display:none}
   .categories-page.active{display:block}
   .theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(74px,1fr));gap:14px;margin-top:18px}
@@ -3094,7 +3225,6 @@ PAGE = """
           <div class="total-value" id="totalValue">$0.00</div>
         </div>
         <button class="refresh-btn" id="refreshBtn">Refresh Prices &amp; Steam Data</button>
-        <button class="refresh-btn" id="detectSteamBtn" type="button" title="Scan your Steam library folders for installed games">Detect Installed Steam Games</button>
       </div>
 
       <div class="search-box">
@@ -3105,6 +3235,9 @@ PAGE = """
       <div class="library-toolbar">
         <div class="toolbar-label">Library</div>
         <input class="filter-search" id="librarySearchInput" type="text" placeholder="Search your library...">
+        <label class="installed-toggle" title="Show only games that are currently installed">
+          <input type="checkbox" id="installedOnlyCheckbox"> Installed only
+        </label>
         <div class="sort-wrap">
           <label for="librarySort">Sort by</label>
           <select id="librarySort" class="sort-select">
@@ -3384,6 +3517,9 @@ const dlcModal=$('dlcModal'), dlcList=$('dlcList'), dlcTitle=$('dlcTitle'), dlcT
 const editCategoryChecks=$('editCategoryChecks');
 const categoryDetailTitle=$('categoryDetailTitle'), categoryDetailCount=$('categoryDetailCount'), categoryGamesGrid=$('categoryGamesGrid');
 const librarySearchInput=$('librarySearchInput'), categoryBoxSearch=$('categoryBoxSearch'), categoryDetailSearch=$('categoryDetailSearch');
+const installedOnlyCheckbox=$('installedOnlyCheckbox');
+const INSTALLED_ONLY_KEY='gamevault_installed_only';
+function isGameInstalled(g){ return g.source==='local' || !!g.installed; }
 let currentCategory=null, currentCategoryIsCustom=false;
 let searchTimer, allGames=[], customCategories=[], currentFilter='All', editingAppid=null, pendingAdd=null, pendingDlc=[], pendingBase=null, pendingBundles=[];
 let editReturnTo='library', editReturnScrollY=0;  // where to go back to when the edit page closes
@@ -3625,7 +3761,8 @@ function gameMatchesQuery(g,q){
 
 function render(){
   const q=librarySearchInput.value.trim().toLowerCase();
-  const games=allGames.filter(g=>gameMatchesQuery(g,q));
+  const installedOnly=installedOnlyCheckbox&&installedOnlyCheckbox.checked;
+  const games=allGames.filter(g=>gameMatchesQuery(g,q)&&(!installedOnly||isGameInstalled(g)));
   grid.innerHTML='';
 
   if(!allGames.length){
@@ -4344,7 +4481,9 @@ async function removeGame(appid){
 }
 
 async function uninstallGame(appid,name,isLocal){
-  const msg=isLocal?`Run ${name}'s uninstaller?`:`Uninstall ${name} through Steam?`;
+  const msg=isLocal
+    ?`Uninstall ${name}? If it has no separate uninstaller, GameVault will delete its game folder plus any leftover data it finds in AppData/Program Files.`
+    :`Uninstall ${name} through Steam?`;
   if(!confirm(msg))return;
   const btn=$('editUninstall');
   const old=btn.textContent;
@@ -4354,15 +4493,19 @@ async function uninstallGame(appid,name,isLocal){
     const data=await res.json();
     if(!res.ok){
       const msgs={
-        no_uninstaller:`No uninstaller was found next to ${name}'s .exe.`+(data.game_dir?` You will need to delete its folder yourself: ${data.game_dir}`:' You will need to delete its files yourself.'),
-        not_installed:`${name} isn't currently installed — try "Detect Installed Steam Games" first.`,
+        not_installed:`${name} isn't currently installed.`,
         exe_not_found:`${name}'s saved .exe path no longer exists.`,
         not_found:`${name} couldn't be found in your library.`,
       };
       alert(msgs[data.error]||('Could not uninstall '+name+': '+(data.detail||data.error||'unknown error')));
-    }else{
-      alert(isLocal?`${name}'s uninstaller has been launched.`:`Steam's uninstall dialog for ${name} has been opened.`);
+    }else if(data.method==='manual'){
+      const n=(data.removed_paths||[]).length;
+      alert(`${name} has been removed`+(n?` — cleaned up ${n} folder${n===1?'':'s'} (its game files plus any leftover data found in AppData/Program Files).`:'.'));
+      await removeGame(appid);
+    }else if(isLocal){
+      alert(`${name}'s uninstaller has been launched.`);
     }
+    // Steam handoff needs no popup here -- Steam shows its own dialog.
   }catch(e){
     alert('Could not reach GameVault to uninstall '+name+'.');
   }finally{
@@ -4371,9 +4514,9 @@ async function uninstallGame(appid,name,isLocal){
 }
 
 async function detectSteamGames(silent){
-  const btn=$('detectSteamBtn');
-  let old;
-  if(!silent&&btn){old=btn.textContent;btn.disabled=true;btn.textContent='Scanning Steam library...';}
+  // Runs quietly on startup and every 3 minutes in the background -- there's
+  // no button for this anymore, so `silent` is effectively always true, but
+  // it's kept so this can still be called with feedback if ever needed.
   try{
     const res=await fetch('/api/detect_steam_games',{method:'POST'});
     const data=await res.json();
@@ -4381,8 +4524,6 @@ async function detectSteamGames(silent){
     if(!silent&&data.added)alert(data.added.length?`Found ${data.added.length} newly installed Steam game(s).`:'No new installed Steam games found.');
   }catch(e){
     if(!silent)alert('Could not scan your Steam library.');
-  }finally{
-    if(!silent&&btn){btn.disabled=false;btn.textContent=old;}
   }
 }
 
@@ -4634,6 +4775,13 @@ document.addEventListener('click',e=>{
 editRating.addEventListener('input',updateRatingPreview);
 librarySearchInput.addEventListener('input',render);
 librarySort.addEventListener('change',render);
+if(installedOnlyCheckbox){
+  try{installedOnlyCheckbox.checked=localStorage.getItem(INSTALLED_ONLY_KEY)==='1';}catch(e){}
+  installedOnlyCheckbox.addEventListener('change',()=>{
+    try{localStorage.setItem(INSTALLED_ONLY_KEY,installedOnlyCheckbox.checked?'1':'0');}catch(e){}
+    render();
+  });
+}
 categoryBoxSearch.addEventListener('input',buildCategoryBoxes);
 categoryDetailSearch.addEventListener('input',renderCategoryDetail);
 categorySort.addEventListener('change',renderCategoryDetail);
@@ -4652,7 +4800,6 @@ $('editUninstall').onclick=()=>{
   if(!g)return;
   uninstallGame(g.appid,g.name,g.source==='local');
 };
-$('detectSteamBtn').onclick=()=>detectSteamGames(false);
 
 async function loadCustomCategories(){
   const res=await fetch('/api/categories');
@@ -4864,6 +5011,9 @@ detectSteamGames(true);  // quiet scan on startup so newly installed Steam games
 // game runs, without a manual refresh. Skipped while editing a game so it
 // doesn't disturb an in-progress edit.
 setInterval(()=>{ if(editingAppid===null) loadGames(); },20000);
+// Quietly re-scan the Steam library every 3 minutes so newly installed (or
+// uninstalled) Steam games are picked up automatically -- no button needed.
+setInterval(()=>{ if(editingAppid===null) detectSteamGames(true); },180000);
 </script>
 </body>
 </html>
