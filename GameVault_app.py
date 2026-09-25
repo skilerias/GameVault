@@ -46,7 +46,7 @@ import shutil
 from html import unescape
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, Response, jsonify, request
 
 try:
     import webview  # pywebview — gives us the native desktop window
@@ -872,17 +872,38 @@ def steam_details(appid, include_tags=False):
     }
 
 
+# In-memory mirror of DLC_CACHE_FILE. Every steamspy_top_tags /
+# steamspy_games_for_tag / DLC-bundle / recommendations lookup used to call
+# _load_dlc_cache(), which re-read and re-parsed the *entire* cache file
+# from disk every single time — including in tight loops like api_refresh
+# iterating a whole library. Since this process is the only writer of that
+# file, it's safe to keep one in-memory copy and only touch disk again when
+# something actually changes it (_save_dlc_cache below still writes through
+# to disk immediately on every mutation, exactly as before, so durability
+# is unchanged — this only removes the redundant re-reads).
+_DLC_CACHE_LOCK = threading.Lock()
+_DLC_CACHE_MEM = None
+
+
 def _load_dlc_cache():
-    try:
-        if os.path.exists(DLC_CACHE_FILE):
-            with open(DLC_CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except (OSError, ValueError, TypeError):
-        pass
-    return {}
+    global _DLC_CACHE_MEM
+    with _DLC_CACHE_LOCK:
+        if _DLC_CACHE_MEM is None:
+            try:
+                if os.path.exists(DLC_CACHE_FILE):
+                    with open(DLC_CACHE_FILE, "r", encoding="utf-8") as f:
+                        _DLC_CACHE_MEM = json.load(f)
+                else:
+                    _DLC_CACHE_MEM = {}
+            except (OSError, ValueError, TypeError):
+                _DLC_CACHE_MEM = {}
+        return _DLC_CACHE_MEM
 
 
 def _save_dlc_cache(cache):
+    global _DLC_CACHE_MEM
+    with _DLC_CACHE_LOCK:
+        _DLC_CACHE_MEM = cache
     try:
         _atomic_write_json(DLC_CACHE_FILE, cache)
     except OSError:
@@ -1319,7 +1340,15 @@ def index():
     # Substituted per-request (not baked in once at import time) so a
     # custom icon set via the Themes page shows up on the very next page
     # load, with no restart needed.
-    return render_template_string(PAGE.replace("__APP_ICON_DATA_URI__", _current_icon_data_uri()))
+    #
+    # PAGE is plain HTML/CSS/JS with a single literal placeholder — it has
+    # no Jinja {{ }} / {% %} syntax at all, so running it through
+    # render_template_string() on every request just meant Flask compiling
+    # and walking a 100KB+ Jinja template for nothing. A plain Response
+    # with the same bytes is byte-for-byte identical output, just without
+    # that wasted work on every page load.
+    html = PAGE.replace("__APP_ICON_DATA_URI__", _current_icon_data_uri())
+    return Response(html, mimetype="text/html")
 
 
 @app.route("/api/games")
@@ -2374,13 +2403,19 @@ _PENDING_PLAYTIME = {}  # appid(int) -> extra seconds accumulated since last sav
 _PLAYTIME_POLL_SECONDS = 10
 
 
-def _flush_pending_playtime():
+def _flush_pending_playtime(games=None):
     with _PLAYTIME_LOCK:
         pending = dict(_PENDING_PLAYTIME)
         _PENDING_PLAYTIME.clear()
     if not pending:
         return
-    games = load_library()
+    # The tracker loop below already has a freshly-loaded copy of the
+    # library in hand (it just scanned every game's process for this same
+    # tick) — reuse it instead of reading and re-parsing library.json from
+    # disk a second time. Callers outside the loop (none currently) still
+    # get the old load-it-here behavior by omitting the argument.
+    if games is None:
+        games = load_library()
     changed = False
     for g in games:
         extra = pending.get(int(g["appid"]))
@@ -2411,7 +2446,7 @@ def _playtime_tracker_loop():
                 _RUNNING_STATE[appid] = running
                 if running:
                     _PENDING_PLAYTIME[appid] = _PENDING_PLAYTIME.get(appid, 0) + elapsed
-        _flush_pending_playtime()
+        _flush_pending_playtime(games)
 
 
 def _start_playtime_tracker():
@@ -4520,8 +4555,19 @@ window.addEventListener('scroll',()=>{
   if(nearBottom) loadMoreRecommendations(false);
 });
 
+let _lastGamesSignature=null;
 function setGames(games){
+  // The 20s background poll (loadGames below) calls this every tick even
+  // when nothing actually changed. Rebuilding the whole grid from scratch
+  // (grid.innerHTML='' + re-creating every card) is wasted work — and
+  // visible jank on a big library — when the data is identical to what's
+  // already on screen, so skip the rebuild in that case. Any real change
+  // (a new game, an edited rating, playtime ticking up on a running game,
+  // etc.) still renders immediately as before.
+  const sig=JSON.stringify(games);
   allGames=games;
+  if(sig===_lastGamesSignature)return;
+  _lastGamesSignature=sig;
   buildCategoryBoxes();
   render();
   renderCategoryDetail();
