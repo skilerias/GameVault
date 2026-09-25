@@ -84,8 +84,8 @@ begin
   Result := not FileExists(ExpandConstant('{autoprograms}\GameVault.lnk'));
 end;
 
-// Make sure GameVault (and its embedded browser child processes) isn't running,
-// otherwise Windows keeps its files locked and they can't be replaced.
+// Make sure GameVault isn't running, otherwise Windows keeps its files
+// locked and they can't be replaced.
 function IsGameVaultRunning: Boolean;
 var
   ResultCode: Integer;
@@ -106,14 +106,29 @@ var
   ResultCode: Integer;
   i: Integer;
 begin
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM {#MyAppExeName}', '',
+  // NOTE: deliberately no /T here. /T also kills every *child* process of
+  // any matched GameVault.exe -- and when this installer was launched from
+  // inside a still-running GameVault (the in-app "Update now" button), that
+  // launch can end up making this very Setup.exe process a child of
+  // GameVault.exe (ShellExecuteW's "runas" only routes through the UAC
+  // broker -- which gives the new process a different parent -- when the
+  // caller ISN'T already elevated; if GameVault itself is already running
+  // as admin, "runas" just spawns Setup.exe directly underneath it). With
+  // /T, the moment this line ran it killed GameVault.exe AND, as one of its
+  // descendants, itself -- the installer dying right after the wizard's
+  // "Update" click with no error, while a manually downloaded/run installer
+  // (never a child of GameVault) was unaffected and updated normally.
+  // Dropping /T is safe: GameVault's WebView2 helper processes run out of
+  // Edge's own install folder, not GameVault's, so they never lock any file
+  // this installer needs to replace -- only GameVault.exe itself does.
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Poll instead of trusting a fixed short sleep. This matters most when
   // the update was triggered from *inside* GameVault itself (it has to
-  // kill its own running instance, plus its embedded WebView2 browser
-  // child processes) -- a flat 800ms wasn't always long enough for every
-  // file handle to actually release, so a few files (like VERSION) could
-  // silently keep their old content even though the install "succeeded".
+  // kill its own running instance) -- a flat 800ms wasn't always long
+  // enough for every file handle to actually release, so a few files (like
+  // VERSION) could silently keep their old content even though the install
+  // "succeeded".
   for i := 1 to 20 do
   begin
     if not IsGameVaultRunning then
