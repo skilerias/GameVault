@@ -86,13 +86,41 @@ end;
 
 // Make sure GameVault (and its embedded browser child processes) isn't running,
 // otherwise Windows keeps its files locked and they can't be replaced.
+function IsGameVaultRunning: Boolean;
+var
+  ResultCode: Integer;
+  TmpFile: String;
+  Contents: AnsiString;
+begin
+  Result := False;
+  TmpFile := ExpandConstant('{tmp}\gv_check.txt');
+  Exec(ExpandConstant('{cmd}'),
+       '/C tasklist /FI "IMAGENAME eq {#MyAppExeName}" > "' + TmpFile + '"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if LoadStringFromFile(TmpFile, Contents) then
+    Result := Pos(Lowercase('{#MyAppExeName}'), Lowercase(Contents)) > 0;
+end;
+
 procedure CloseGameVault;
 var
   ResultCode: Integer;
+  i: Integer;
 begin
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /T /IM {#MyAppExeName}', '',
        SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(800);
+  // Poll instead of trusting a fixed short sleep. This matters most when
+  // the update was triggered from *inside* GameVault itself (it has to
+  // kill its own running instance, plus its embedded WebView2 browser
+  // child processes) -- a flat 800ms wasn't always long enough for every
+  // file handle to actually release, so a few files (like VERSION) could
+  // silently keep their old content even though the install "succeeded".
+  for i := 1 to 20 do
+  begin
+    if not IsGameVaultRunning then
+      break;
+    Sleep(300);
+  end;
+  Sleep(500);
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
