@@ -2572,6 +2572,42 @@ def check_for_update(timeout=8):
         return {"ok": False, "error": "unexpected", "detail": str(e), **base}
 
 
+class _ElevationError(Exception):
+    """Raised when the installer couldn't be launched with admin rights."""
+
+
+# ShellExecuteW return codes <= 32 mean failure (this is a WinAPI quirk:
+# success returns an HINSTANCE-shaped value, always > 32). These are the
+# ones actually worth telling the user apart.
+_SHELLEXEC_ERRORS = {
+    0: "not_enough_memory",
+    2: "installer_missing",
+    5: "elevation_denied",     # UAC blocked it (e.g. non-admin account, no consent rights)
+    8: "not_enough_memory",
+    26: "sharing_violation",
+    1223: "elevation_cancelled",  # user clicked "No" on the UAC prompt
+}
+
+
+def _launch_installer_elevated(installer_path):
+    """Launch installer_path asking Windows for admin rights up front.
+
+    GameVault.iss's installer requires admin (PrivilegesRequired=admin).
+    subprocess.Popen() launches via CreateProcess, which does NOT show a
+    UAC prompt for a program whose manifest demands elevation -- it just
+    fails outright (WinError 740, ERROR_ELEVATION_REQUIRED) with no dialog
+    at all. From the user's side that looked like GameVault silently dying
+    with the update never actually happening. ShellExecuteW with the
+    "runas" verb is the API that actually triggers the UAC prompt.
+    """
+    import ctypes
+    result = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", installer_path, None, None, 1  # SW_SHOWNORMAL
+    )
+    if result <= 32:
+        raise _ElevationError(_SHELLEXEC_ERRORS.get(result, "launch_failed_%d" % result))
+
+
 def _run_update_download_and_launch(download_url, asset_name):
     """Runs in a background thread: download the installer to a temp
     folder, then launch it. GameVault.iss's installer already knows how to
@@ -2596,14 +2632,16 @@ def _run_update_download_and_launch(download_url, asset_name):
                     if total:
                         _update_install_state["percent"] = min(99, int(written * 100 / total))
         _update_install_state = {"stage": "launching", "percent": 100, "error": None}
-        # Detached so the installer survives this app closing/being killed
-        # a moment later (the installer force-closes GameVault itself too).
         if sys.platform.startswith("win"):
-            subprocess.Popen([installer_path], close_fds=True,
-                              creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            _launch_installer_elevated(installer_path)
         else:
+            # Detached so the installer survives this app closing/being
+            # killed a moment later (the installer force-closes GameVault
+            # itself too).
             subprocess.Popen([installer_path], close_fds=True)
         _update_install_state = {"stage": "done", "percent": 100, "error": None}
+    except _ElevationError as e:
+        _update_install_state = {"stage": "error", "percent": 0, "error": str(e)}
     except Exception as e:
         _update_install_state = {"stage": "error", "percent": 0, "error": str(e)}
 
@@ -3988,9 +4026,20 @@ function setUpdateProgress(stage,percent){
   const labels={
     downloading:`Downloading update... ${percent||0}%`,
     launching:'Starting installer...',
-    done:'Installer launched. GameVault will restart shortly.',
+    done:'Installer launched — a Windows permission prompt may appear, then follow the setup steps. GameVault will close during install and reopen automatically.',
   };
   updateProgressLabel.textContent=labels[stage]||'';
+}
+
+function formatInstallError(err){
+  const messages={
+    elevation_denied:"Windows blocked the installer from getting admin rights. Try again and approve the permission prompt.",
+    elevation_cancelled:"Update cancelled: the admin permission prompt was dismissed.",
+    installer_missing:"The downloaded installer couldn't be found. Try again.",
+    not_enough_memory:"Not enough resources to start the installer. Close some programs and try again.",
+    sharing_violation:"The installer file is in use. Try again.",
+  };
+  return messages[err]||`Update failed: ${err||'unknown error'}`;
 }
 
 async function pollInstallStatus(){
@@ -3998,7 +4047,7 @@ async function pollInstallStatus(){
     const res=await fetch('/api/app_update/install_status');
     const data=await res.json();
     if(data.stage==='error'){
-      updateProgressLabel.textContent=`Update failed: ${data.error||'unknown error'}`;
+      updateProgressLabel.textContent=formatInstallError(data.error);
       installUpdateBtn.disabled=false;
       return;
     }
