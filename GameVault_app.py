@@ -2985,14 +2985,14 @@ PAGE = """
   body{margin:0;background:var(--bg);color:var(--ink);font-family:"Segoe UI",Tahoma,Geneva,sans-serif}
   .app-shell{min-height:100vh;display:grid;grid-template-columns:210px minmax(0,1fr);transition:grid-template-columns .22s ease}
   .app-shell.nav-hidden{grid-template-columns:0 minmax(0,1fr)}
-  .side-nav{background:#10141a;border-right:1px solid var(--line);padding:18px 10px;overflow:hidden;transition:opacity .18s ease,padding .22s ease,border .22s ease}
+  .side-nav{background:#10141a;border-right:1px solid var(--line);padding:18px 10px;overflow-x:hidden;overflow-y:auto;transition:opacity .18s ease,padding .22s ease,border .22s ease;position:sticky;top:0;align-self:start;max-height:100vh;z-index:30}
   .app-shell.nav-hidden .side-nav{opacity:0;padding-left:0;padding-right:0;border-right:0}
   .side-nav-top{display:flex;justify-content:flex-end;margin-bottom:22px}
-  /* absolute (not fixed): these scroll away with the page instead of staying
-     pinned to the viewport while you scroll down */
-  .nav-toggle{position:absolute;top:18px;left:0;z-index:1000;width:30px;height:42px;background:var(--bg-elev);border:1px solid var(--line);border-left:0;color:var(--ink-dim);border-radius:0 9px 9px 0;cursor:pointer;font-size:1rem;box-shadow:0 3px 10px rgba(0,0,0,.2)}
+  /* fixed (not absolute): these stay pinned to the viewport instead of
+     scrolling away with the page when you scroll down */
+  .nav-toggle{position:fixed;top:18px;left:0;z-index:1000;width:30px;height:42px;background:var(--bg-elev);border:1px solid var(--line);border-left:0;color:var(--ink-dim);border-radius:0 9px 9px 0;cursor:pointer;font-size:1rem;box-shadow:0 3px 10px rgba(0,0,0,.2)}
   .nav-toggle:hover{border-color:var(--teal);color:var(--ink)}
-  .fullscreen-toggle{position:absolute;top:18px;right:18px;z-index:1000;width:38px;height:38px;display:inline-flex;align-items:center;justify-content:center;background:var(--bg-elev);border:1px solid var(--line);color:var(--ink-dim);border-radius:9px;cursor:pointer;font-size:1.05rem;box-shadow:0 3px 10px rgba(0,0,0,.2)}
+  .fullscreen-toggle{position:fixed;top:18px;right:18px;z-index:1000;width:38px;height:38px;display:inline-flex;align-items:center;justify-content:center;background:var(--bg-elev);border:1px solid var(--line);color:var(--ink-dim);border-radius:9px;cursor:pointer;font-size:1.05rem;box-shadow:0 3px 10px rgba(0,0,0,.2)}
   .fullscreen-toggle:hover{border-color:var(--teal);color:var(--ink)}
   .nav-item{width:100%;display:flex;align-items:center;gap:10px;border:1px solid rgba(var(--accent-rgb),.45);background:rgba(var(--accent-rgb),.16);color:var(--ink);border-radius:9px;padding:10px;font:600 .86rem inherit;white-space:nowrap}
   .nav-item .nav-icon{color:var(--gold);font-size:1.05rem;min-width:17px;text-align:center}
@@ -3152,7 +3152,7 @@ PAGE = """
   .category-desc{color:var(--ink-dim);font-size:.78rem;margin-top:7px}
   @media(max-width:760px){
     .app-shell,.app-shell.nav-hidden{grid-template-columns:1fr}
-    .side-nav{border-right:0;border-bottom:1px solid var(--line);padding:9px 14px;display:flex;align-items:flex-start;gap:12px}
+    .side-nav{border-right:0;border-bottom:1px solid var(--line);padding:9px 14px;display:flex;align-items:flex-start;gap:12px;max-height:none}
     .side-nav-top{margin:0}
     .nav-item{width:auto}
     .category-nav{position:absolute;left:0;right:0;top:66px;background:#10141a;border-bottom:1px solid var(--line);padding:8px 14px;z-index:20;display:flex;overflow-x:auto}
