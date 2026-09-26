@@ -3426,10 +3426,24 @@ PAGE = """
   .category-count{font-size:.7rem;opacity:.7}
   .nav-button{cursor:pointer;text-align:left;font-family:inherit;margin-bottom:8px}
   .nav-button.active{background:rgba(var(--accent-rgb),.24);border-color:rgba(var(--accent-rgb),.65)}
-  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center;position:relative;overflow:hidden;border-radius:18px}
+  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center;position:relative}
   .main-menu-page.active{display:flex}
-  .main-menu-wallpaper{display:none;position:absolute;inset:0;z-index:0;background:#000;border-radius:18px;overflow:hidden}
+  /* Fixed + inset:0 makes this a true full-viewport layer -- it ignores
+     .wrap's max-width/padding and .main-menu-page's own box entirely, so
+     the wallpaper reaches every edge of the window instead of sitting in
+     a small rounded box. display:none on the (non-fixed) .main-menu-page
+     parent still hides it whenever some other page is active, so it can
+     never bleed through onto Local Games/Categories/etc. */
+  .main-menu-wallpaper{display:none;position:fixed;inset:0;z-index:-1;background:#000;overflow:hidden}
   .main-menu-wallpaper.active{display:block}
+  /* A softly blurred, scaled-up copy of the same image, sitting behind the
+     sharp one. Used whenever the sharp image can't cleanly fill the whole
+     screen on its own (a small Workshop preview thumbnail shown "contain",
+     or a real wallpaper image shown "contain") -- it fills the leftover
+     space with color instead of ugly black bars or a stretched, pixelated
+     blow-up of a low-res source. */
+  .main-menu-wallpaper-backdrop{display:none;position:absolute;inset:-40px;background-size:cover;background-position:center;filter:blur(38px) brightness(.55) saturate(1.15);transform:scale(1.12)}
+  .main-menu-wallpaper-backdrop.active{display:block}
   .main-menu-wallpaper video,.main-menu-wallpaper img,.main-menu-wallpaper iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:none}
   .main-menu-wallpaper video.fit-cover,.main-menu-wallpaper img.fit-cover{object-fit:cover}
   .main-menu-wallpaper video.fit-contain,.main-menu-wallpaper img.fit-contain{object-fit:contain}
@@ -3660,6 +3674,7 @@ PAGE = """
   <main class="wrap">
     <section class="main-menu-page" id="mainMenuPage">
       <div class="main-menu-wallpaper" id="mainMenuWallpaper">
+        <div class="main-menu-wallpaper-backdrop" id="mainMenuWallpaperBackdrop"></div>
         <video id="mainMenuWallpaperVideo" muted playsinline loop></video>
         <img id="mainMenuWallpaperImg" alt="">
         <iframe id="mainMenuWallpaperFrame" title="Live wallpaper" frameborder="0" scrolling="no"></iframe>
@@ -3985,7 +4000,7 @@ const navLibrary=$('navLibrary'), navCategories=$('navCategories'), navRecommend
 const themesPage=$('themesPage'), themeGrid=$('themeGrid');
 const settingsPage=$('settingsPage');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
-const mainMenuWallpaper=$('mainMenuWallpaper'), mainMenuWallpaperVideo=$('mainMenuWallpaperVideo'), mainMenuWallpaperImg=$('mainMenuWallpaperImg'), mainMenuWallpaperFrame=$('mainMenuWallpaperFrame');
+const mainMenuWallpaper=$('mainMenuWallpaper'), mainMenuWallpaperBackdrop=$('mainMenuWallpaperBackdrop'), mainMenuWallpaperVideo=$('mainMenuWallpaperVideo'), mainMenuWallpaperImg=$('mainMenuWallpaperImg'), mainMenuWallpaperFrame=$('mainMenuWallpaperFrame');
 const wallpaperDetectBtn=$('wallpaperDetectBtn'), wallpaperDetectGrid=$('wallpaperDetectGrid');
 const wallpaperFolderBtn=$('wallpaperFolderBtn'), wallpaperFileBtn=$('wallpaperFileBtn'), wallpaperRemoveBtn=$('wallpaperRemoveBtn'), wallpaperStatus=$('wallpaperStatus');
 const wallpaperControlsRow=$('wallpaperControlsRow'), wallpaperEnabledCheckbox=$('wallpaperEnabledCheckbox'), wallpaperMutedCheckbox=$('wallpaperMutedCheckbox'), wallpaperVolumeRange=$('wallpaperVolumeRange'), wallpaperFitSelect=$('wallpaperFitSelect');
@@ -4810,6 +4825,7 @@ async function loadMainMenuWallpaper(){
   mainMenuWallpaperVideo.style.display='none';
   mainMenuWallpaperImg.style.display='none';
   mainMenuWallpaperFrame.style.display='none';
+  mainMenuWallpaperBackdrop.classList.remove('active');
   try{mainMenuWallpaperVideo.pause();}catch(e){}
   if(!state.enabled){
     mainMenuWallpaper.classList.remove('active');
@@ -4830,12 +4846,25 @@ async function loadMainMenuWallpaper(){
   }else if(state.renderable&&state.wp_type==='image'&&state.asset_url){
     mainMenuWallpaperImg.src=state.asset_url;
     mainMenuWallpaperImg.style.display='block';
+    // Real wallpaper image (not a tiny thumbnail) -- still add the blurred
+    // backdrop so "Fit: contain" doesn't leave hard black bars.
+    mainMenuWallpaperBackdrop.style.backgroundImage=`url("${state.asset_url}")`;
+    mainMenuWallpaperBackdrop.classList.add('active');
   }else if(state.renderable&&state.wp_type==='web'&&state.web_url){
     if(mainMenuWallpaperFrame.getAttribute('src')!==state.web_url)mainMenuWallpaperFrame.setAttribute('src',state.web_url);
     mainMenuWallpaperFrame.style.display='block';
   }else if(state.preview_url){
+    // Wallpaper Engine "scene"/"application" wallpapers can't be rendered
+    // here -- this is just Steam Workshop's small preview thumbnail. Never
+    // stretch that edge-to-edge across the whole screen (that's the
+    // pixelated/blurry look): show it at its own size in the middle,
+    // "contain", and fill the rest with a blurred copy of itself instead.
+    mainMenuWallpaperImg.classList.remove('fit-cover','fit-contain');
+    mainMenuWallpaperImg.classList.add('fit-contain');
     mainMenuWallpaperImg.src=state.preview_url;
     mainMenuWallpaperImg.style.display='block';
+    mainMenuWallpaperBackdrop.style.backgroundImage=`url("${state.preview_url}")`;
+    mainMenuWallpaperBackdrop.classList.add('active');
   }else{
     mainMenuWallpaper.classList.remove('active');
     return;
