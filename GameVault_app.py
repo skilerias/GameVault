@@ -3426,15 +3426,15 @@ PAGE = """
   .category-count{font-size:.7rem;opacity:.7}
   .nav-button{cursor:pointer;text-align:left;font-family:inherit;margin-bottom:8px}
   .nav-button.active{background:rgba(var(--accent-rgb),.24);border-color:rgba(var(--accent-rgb),.65)}
-  .main-menu-page{display:none;min-height:70vh;align-items:center;justify-content:center;position:relative}
+  /* This section itself becomes the full-viewport layer (position:fixed
+     ignores .wrap's max-width/padding and the sidebar grid column
+     entirely) so the wallpaper inside it reaches every edge of the
+     window. z-index:1 keeps it below the sidebar (z-index:30) and the
+     nav/fullscreen toggle buttons (z-index:1000), so those stay usable;
+     display:none while inactive means it never covers other pages. */
+  .main-menu-page{display:none;position:fixed;inset:0;align-items:center;justify-content:center;z-index:1;background:var(--bg);overflow-y:auto}
   .main-menu-page.active{display:flex}
-  /* Fixed + inset:0 makes this a true full-viewport layer -- it ignores
-     .wrap's max-width/padding and .main-menu-page's own box entirely, so
-     the wallpaper reaches every edge of the window instead of sitting in
-     a small rounded box. display:none on the (non-fixed) .main-menu-page
-     parent still hides it whenever some other page is active, so it can
-     never bleed through onto Local Games/Categories/etc. */
-  .main-menu-wallpaper{display:none;position:fixed;inset:0;z-index:-1;background:#000;overflow:hidden}
+  .main-menu-wallpaper{display:none;position:absolute;inset:0;z-index:0;background:#000;overflow:hidden}
   .main-menu-wallpaper.active{display:block}
   /* A softly blurred, scaled-up copy of the same image, sitting behind the
      sharp one. Used whenever the sharp image can't cleanly fill the whole
