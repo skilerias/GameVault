@@ -2697,6 +2697,8 @@ def api_theme_from_image():
 # moving background without going through Wallpaper Engine.
 WALLPAPER_VIDEO_EXTS = {".mp4", ".webm", ".ogg", ".ogv", ".m4v", ".mov"}
 WALLPAPER_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
+WALLPAPER_ENGINE_APPID = "431960"  # Wallpaper Engine's Steam App ID
+_detected_wallpapers_cache = []    # last /api/wallpaper/detect scan; server-side only (raw folder paths never reach the frontend)
 
 _WALLPAPER_DEFAULTS = {
     "enabled": False,
@@ -2832,6 +2834,62 @@ def _parse_wallpaper_file(path):
     return updates, None
 
 
+def _find_wallpaper_engine_project_roots():
+    """Every folder on this machine that Wallpaper Engine itself keeps
+    wallpaper projects in: the Steam Workshop content folder (one per
+    Steam library) for every subscribed wallpaper, plus the app's own
+    "My Projects"/built-in projects folders next to its install. Same
+    best-effort, read-only approach as the Steam game detection above --
+    reuses _find_steam_root()/_library_folders()/_game_install_dir()."""
+    roots = []
+    steam_root = _find_steam_root()
+    if steam_root:
+        for lib in _library_folders(steam_root):
+            workshop = os.path.join(lib, "steamapps", "workshop", "content", WALLPAPER_ENGINE_APPID)
+            if os.path.isdir(workshop):
+                roots.append(workshop)
+    install_dir = _game_install_dir(WALLPAPER_ENGINE_APPID)
+    if install_dir:
+        for sub in ("myprojects", "defaultprojects"):
+            p = os.path.join(install_dir, "projects", sub)
+            if os.path.isdir(p):
+                roots.append(p)
+    return roots
+
+
+def _scan_wallpaper_engine_projects():
+    """Every usable Wallpaper Engine wallpaper actually found under
+    _find_wallpaper_engine_project_roots(), parsed the same way a
+    manually-picked folder would be. Returns a list of dicts carrying a
+    server-side "folder" path (never sent to the frontend) plus the
+    display fields the detect endpoints need."""
+    projects = []
+    seen = set()
+    for root in _find_wallpaper_engine_project_roots():
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in entries:
+            folder = os.path.join(root, name)
+            real = os.path.normpath(folder)
+            if real in seen or not os.path.isdir(folder):
+                continue
+            seen.add(real)
+            updates, err = _parse_wallpaper_project(folder)
+            if err:
+                continue  # not a wallpaper folder, or unsupported with no preview to show
+            projects.append({
+                "folder": folder,
+                "title": updates["title"],
+                "wp_type": updates["wp_type"],
+                "renderable": updates["renderable"],
+                "preview": updates.get("preview"),
+            })
+    projects.sort(key=lambda p: (p["title"] or "").lower())
+    return projects
+
+
 def _wallpaper_public_state(settings):
     """What the front end gets — no raw filesystem paths, just ready-to-use
     URLs and playback flags."""
@@ -2882,6 +2940,58 @@ def api_wallpaper_file():
     if not path:
         return jsonify({"error": "missing_path"}), 400
     updates, err = _parse_wallpaper_file(path)
+    if err:
+        return jsonify({"error": err}), 400
+    settings = _load_wallpaper_settings()
+    settings.update(updates)
+    _save_wallpaper_settings(settings)
+    return jsonify({"ok": True, "state": _wallpaper_public_state(settings)})
+
+
+@app.route("/api/wallpaper/detect")
+def api_wallpaper_detect():
+    """Scan for Wallpaper Engine wallpapers already on this machine (Steam
+    Workshop subscriptions plus the app's own My Projects folder) so the
+    user doesn't have to hunt down and browse to the right folder by hand.
+    Refreshes _detected_wallpapers_cache, which the two routes below read
+    from by index -- the frontend only ever sees titles/preview URLs/ids,
+    never raw filesystem paths."""
+    global _detected_wallpapers_cache
+    engine_found = bool(_find_wallpaper_engine_project_roots())
+    _detected_wallpapers_cache = _scan_wallpaper_engine_projects()
+    wallpapers = [{
+        "id": i,
+        "title": p["title"],
+        "wp_type": p["wp_type"],
+        "renderable": p["renderable"],
+        "preview_url": ("/api/wallpaper/detect_preview/%d" % i) if p.get("preview") else None,
+    } for i, p in enumerate(_detected_wallpapers_cache)]
+    return jsonify({"engine_found": engine_found, "wallpapers": wallpapers})
+
+
+@app.route("/api/wallpaper/detect_preview/<int:idx>")
+def api_wallpaper_detect_preview(idx):
+    """Thumbnail for one entry from the last /api/wallpaper/detect scan."""
+    if idx < 0 or idx >= len(_detected_wallpapers_cache):
+        return jsonify({"error": "not_found"}), 404
+    p = _detected_wallpapers_cache[idx]
+    path = _wallpaper_safe_path(p["folder"], p.get("preview"))
+    if not path:
+        return jsonify({"error": "not_found"}), 404
+    from flask import send_file
+    return send_file(path, conditional=True)
+
+
+@app.route("/api/wallpaper/detect_select", methods=["POST"])
+def api_wallpaper_detect_select():
+    """Set the live wallpaper to one of the auto-detected entries, by the
+    id the last /api/wallpaper/detect scan gave it."""
+    data = request.get_json(silent=True) or {}
+    idx = data.get("id")
+    if not isinstance(idx, int) or idx < 0 or idx >= len(_detected_wallpapers_cache):
+        return jsonify({"error": "not_found"}), 400
+    folder = _detected_wallpapers_cache[idx]["folder"]
+    updates, err = _parse_wallpaper_project(folder)
     if err:
         return jsonify({"error": err}), 400
     settings = _load_wallpaper_settings()
@@ -3356,6 +3466,12 @@ PAGE = """
   .appearance-row{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
   .icon-preview{width:48px;height:48px;border-radius:10px;object-fit:cover;border:1px solid var(--line);background:var(--bg-elev)}
   .appearance-status{font-size:.8rem;color:var(--ink-dim)}
+  .wallpaper-detect-grid{display:none;flex-wrap:wrap;gap:10px;margin-top:12px}
+  .wallpaper-detect-grid.active{display:flex}
+  .wallpaper-detect-item{width:130px;background:var(--bg-elev-2);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;text-align:left;padding:0;font:inherit;color:var(--ink)}
+  .wallpaper-detect-item:hover{border-color:rgba(var(--accent-rgb),.6)}
+  .wallpaper-detect-thumb{width:100%;height:74px;object-fit:cover;display:block;background:#111}
+  .wallpaper-detect-title{font-size:.72rem;padding:6px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .update-notes{margin-top:10px;font-size:.8rem;color:var(--ink-dim);white-space:pre-wrap;max-height:120px;overflow-y:auto;background:var(--bg-elev);border:1px solid var(--line);border-radius:8px;padding:10px}
   .update-progress-wrap{margin-top:12px}
   .update-progress-bar{width:100%;max-width:360px;height:8px;border-radius:5px;background:var(--bg-elev-2);overflow:hidden}
@@ -3700,11 +3816,13 @@ PAGE = """
         <h2 class="appearance-block-title">Live Wallpaper</h2>
         <div class="section-note">Play a Wallpaper Engine wallpaper (or any video/image) behind the Main Menu buttons. Wallpaper Engine "scene"/"application" wallpapers can't be animated here — those show their static preview instead.</div>
         <div class="appearance-row">
+          <button type="button" class="small-btn" id="wallpaperDetectBtn">Auto-detect Wallpaper Engine</button>
           <button type="button" class="small-btn" id="wallpaperFolderBtn">Choose Wallpaper Engine folder...</button>
           <button type="button" class="small-btn" id="wallpaperFileBtn">Choose video or image file...</button>
           <button type="button" class="small-btn btn-cancel" id="wallpaperRemoveBtn">Remove</button>
         </div>
         <div class="appearance-status" id="wallpaperStatus">No live wallpaper set.</div>
+        <div class="wallpaper-detect-grid" id="wallpaperDetectGrid"></div>
         <div class="appearance-row" id="wallpaperControlsRow" style="display:none">
           <label class="appearance-status" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="wallpaperEnabledCheckbox"> Show on Main Menu</label>
           <label class="appearance-status" style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="wallpaperMutedCheckbox"> Muted</label>
@@ -3868,6 +3986,7 @@ const themesPage=$('themesPage'), themeGrid=$('themeGrid');
 const settingsPage=$('settingsPage');
 const themeImageBtn=$('themeImageBtn'), themeImageInput=$('themeImageInput'), themeImageStatus=$('themeImageStatus');
 const mainMenuWallpaper=$('mainMenuWallpaper'), mainMenuWallpaperVideo=$('mainMenuWallpaperVideo'), mainMenuWallpaperImg=$('mainMenuWallpaperImg'), mainMenuWallpaperFrame=$('mainMenuWallpaperFrame');
+const wallpaperDetectBtn=$('wallpaperDetectBtn'), wallpaperDetectGrid=$('wallpaperDetectGrid');
 const wallpaperFolderBtn=$('wallpaperFolderBtn'), wallpaperFileBtn=$('wallpaperFileBtn'), wallpaperRemoveBtn=$('wallpaperRemoveBtn'), wallpaperStatus=$('wallpaperStatus');
 const wallpaperControlsRow=$('wallpaperControlsRow'), wallpaperEnabledCheckbox=$('wallpaperEnabledCheckbox'), wallpaperMutedCheckbox=$('wallpaperMutedCheckbox'), wallpaperVolumeRange=$('wallpaperVolumeRange'), wallpaperFitSelect=$('wallpaperFitSelect');
 const iconPreview=$('iconPreview'), iconChooseBtn=$('iconChooseBtn'), iconFileInput=$('iconFileInput'), iconResetBtn=$('iconResetBtn'), iconStatus=$('iconStatus');
@@ -4557,6 +4676,67 @@ async function pushWallpaperSettings(patch){
     if(res.ok)applyWallpaperState(data.state);
   }catch(e){}
 }
+
+function renderWallpaperDetectResults(data){
+  wallpaperDetectGrid.innerHTML='';
+  wallpaperDetectGrid.classList.remove('active');
+  const list=(data&&data.wallpapers)||[];
+  if(!list.length){
+    wallpaperStatus.textContent=(data&&data.engine_found)
+      ?'Wallpaper Engine was found, but no usable wallpapers are downloaded yet.'
+      :"Couldn't find Wallpaper Engine on this PC — install it via Steam, or use the folder/file buttons instead.";
+    return;
+  }
+  list.forEach(w=>{
+    const item=document.createElement('button');
+    item.type='button';
+    item.className='wallpaper-detect-item';
+    item.title=w.renderable?(w.title||'Untitled'):`${w.title||'Untitled'} (preview only)`;
+    if(w.preview_url){
+      const img=document.createElement('img');
+      img.className='wallpaper-detect-thumb';
+      img.src=w.preview_url;
+      img.alt='';
+      item.appendChild(img);
+    }else{
+      const ph=document.createElement('div');
+      ph.className='wallpaper-detect-thumb';
+      ph.style.cssText='display:flex;align-items:center;justify-content:center;font-size:.65rem;color:var(--ink-dim)';
+      ph.textContent=w.wp_type||'wallpaper';
+      item.appendChild(ph);
+    }
+    const label=document.createElement('div');
+    label.className='wallpaper-detect-title';
+    label.textContent=w.title||'Untitled';
+    item.appendChild(label);
+    item.onclick=async()=>{
+      wallpaperStatus.textContent='Loading wallpaper...';
+      try{
+        const res=await fetch('/api/wallpaper/detect_select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:w.id})});
+        const d=await res.json();
+        if(!res.ok){wallpaperStatus.textContent=wallpaperErrorMessage(d.error);return;}
+        applyWallpaperState(d.state);
+        wallpaperDetectGrid.classList.remove('active');
+      }catch(e){
+        wallpaperStatus.textContent='Could not load that wallpaper.';
+      }
+    };
+    wallpaperDetectGrid.appendChild(item);
+  });
+  wallpaperDetectGrid.classList.add('active');
+  wallpaperStatus.textContent=`Found ${list.length} wallpaper${list.length===1?'':'s'} — pick one below.`;
+}
+
+if(wallpaperDetectBtn)wallpaperDetectBtn.onclick=async()=>{
+  wallpaperStatus.textContent='Looking for Wallpaper Engine...';
+  wallpaperDetectGrid.classList.remove('active');
+  try{
+    const res=await fetch('/api/wallpaper/detect');
+    renderWallpaperDetectResults(await res.json());
+  }catch(e){
+    wallpaperStatus.textContent='Could not scan for Wallpaper Engine.';
+  }
+};
 
 if(wallpaperFolderBtn)wallpaperFolderBtn.onclick=async()=>{
   if(!(window.pywebview&&window.pywebview.api&&window.pywebview.api.pick_folder)){
